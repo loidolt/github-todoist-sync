@@ -1,11 +1,13 @@
 /**
  * GitHub ↔ Todoist Sync Worker
  *
+ * Polling-based bidirectional sync between GitHub issues and Todoist tasks.
+ * Uses Cloudflare Cron Triggers for scheduled sync every 15 minutes.
+ *
  * Routes:
- *   POST /github-webhook   - Receives GitHub issue events, creates Todoist tasks
- *   POST /todoist-webhook  - Receives Todoist completion events, closes GitHub issues
- *   POST /backfill         - Backfill existing GitHub issues to Todoist
  *   GET  /health           - Health check endpoint
+ *   GET  /sync-status      - Polling sync status and health
+ *   POST /backfill         - Backfill existing GitHub issues to Todoist
  *   GET  /api-docs         - Swagger UI documentation
  *   GET  /openapi.json     - OpenAPI specification
  */
@@ -47,90 +49,33 @@ function getOpenApiSpec(baseUrl) {
           },
         },
       },
-      '/github-webhook': {
-        post: {
-          summary: 'GitHub webhook endpoint',
-          description: 'Receives GitHub issue events and syncs them to Todoist tasks. Handles: opened, closed, edited, reopened actions.',
-          tags: ['Webhooks'],
-          parameters: [
-            {
-              name: 'X-GitHub-Event',
-              in: 'header',
-              required: true,
-              schema: { type: 'string', example: 'issues' },
-              description: 'GitHub event type',
-            },
-            {
-              name: 'X-Hub-Signature-256',
-              in: 'header',
-              required: true,
-              schema: { type: 'string' },
-              description: 'HMAC-SHA256 signature (sha256=...)',
-            },
-            {
-              name: 'X-GitHub-Delivery',
-              in: 'header',
-              required: true,
-              schema: { type: 'string', format: 'uuid' },
-              description: 'Unique delivery ID for idempotency',
-            },
-          ],
-          requestBody: {
-            required: true,
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  description: 'GitHub webhook payload',
+      '/sync-status': {
+        get: {
+          summary: 'Sync status',
+          description: 'Returns the current polling sync status and health information',
+          tags: ['Health'],
+          responses: {
+            200: {
+              description: 'Sync status returned',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      status: { type: 'string', enum: ['healthy', 'degraded', 'error'], example: 'healthy' },
+                      lastSync: { type: 'string', example: '2024-01-15T10:30:00Z' },
+                      lastGitHubSync: { type: 'string', example: '2024-01-15T10:30:00Z' },
+                      todoistSyncTokenAge: { type: 'string', example: 'incremental' },
+                      pollCount: { type: 'integer', example: 42 },
+                      timeSinceLastPollMinutes: { type: 'integer', example: 5 },
+                      pollingEnabled: { type: 'boolean', example: true },
+                      pollingIntervalMinutes: { type: 'integer', example: 15 },
+                      warning: { type: 'string', description: 'Present if status is degraded' },
+                    },
+                  },
                 },
               },
             },
-          },
-          responses: {
-            200: { description: 'Event processed or ignored' },
-            201: { description: 'Task created in Todoist' },
-            401: { description: 'Invalid signature' },
-            500: { description: 'Server error' },
-          },
-        },
-      },
-      '/todoist-webhook': {
-        post: {
-          summary: 'Todoist webhook endpoint',
-          description: 'Receives Todoist events and syncs them to GitHub issues. Handles: item:added, item:completed, item:updated, item:uncompleted events.',
-          tags: ['Webhooks'],
-          parameters: [
-            {
-              name: 'X-Todoist-Hmac-SHA256',
-              in: 'header',
-              required: true,
-              schema: { type: 'string' },
-              description: 'Base64-encoded HMAC-SHA256 signature',
-            },
-            {
-              name: 'X-Todoist-Delivery-ID',
-              in: 'header',
-              required: true,
-              schema: { type: 'string' },
-              description: 'Unique delivery ID for idempotency',
-            },
-          ],
-          requestBody: {
-            required: true,
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  description: 'Todoist webhook payload',
-                },
-              },
-            },
-          },
-          responses: {
-            200: { description: 'Event processed or ignored' },
-            201: { description: 'Issue created in GitHub' },
-            401: { description: 'Invalid signature' },
-            500: { description: 'Server error' },
           },
         },
       },
@@ -250,8 +195,7 @@ function getOpenApiSpec(baseUrl) {
       },
     },
     tags: [
-      { name: 'Health', description: 'Service health endpoints' },
-      { name: 'Webhooks', description: 'Webhook endpoints for GitHub and Todoist' },
+      { name: 'Health', description: 'Service health and sync status endpoints' },
       { name: 'Backfill', description: 'Backfill existing issues to Todoist' },
     ],
   };
@@ -297,25 +241,6 @@ function getSwaggerUiHtml(baseUrl) {
 // Utility Functions
 // =============================================================================
 
-const WEBHOOK_TTL = 86400; // 24 hours in seconds
-
-/**
- * Check if a webhook has already been processed (idempotency)
- */
-async function isWebhookProcessed(env, webhookId) {
-  if (!webhookId || !env.WEBHOOK_CACHE) return false;
-  const cached = await env.WEBHOOK_CACHE.get(webhookId);
-  return cached !== null;
-}
-
-/**
- * Mark a webhook as processed
- */
-async function markWebhookProcessed(env, webhookId) {
-  if (!webhookId || !env.WEBHOOK_CACHE) return;
-  await env.WEBHOOK_CACHE.put(webhookId, 'processed', { expirationTtl: WEBHOOK_TTL });
-}
-
 /**
  * Sleep for a specified number of milliseconds
  */
@@ -358,6 +283,633 @@ async function withRetry(fn, options = {}) {
 }
 
 // =============================================================================
+// Sync State Management (for polling-based sync)
+// =============================================================================
+
+const SYNC_STATE_KEY = 'sync:state';
+
+/**
+ * Load sync state from KV store
+ * Returns default state if not found
+ */
+async function loadSyncState(env) {
+  if (!env.WEBHOOK_CACHE) {
+    return getDefaultSyncState();
+  }
+
+  try {
+    const state = await env.WEBHOOK_CACHE.get(SYNC_STATE_KEY, 'json');
+    return state || getDefaultSyncState();
+  } catch (error) {
+    console.error('Failed to load sync state:', error);
+    return getDefaultSyncState();
+  }
+}
+
+/**
+ * Save sync state to KV store
+ */
+async function saveSyncState(env, state) {
+  if (!env.WEBHOOK_CACHE) {
+    console.warn('WEBHOOK_CACHE not available, cannot save sync state');
+    return;
+  }
+
+  try {
+    await env.WEBHOOK_CACHE.put(SYNC_STATE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.error('Failed to save sync state:', error);
+  }
+}
+
+/**
+ * Get default sync state for initial run
+ */
+function getDefaultSyncState() {
+  return {
+    lastGitHubSync: null, // ISO 8601 timestamp, null = full sync
+    todoistSyncToken: '*', // '*' = full sync for Todoist
+    lastPollTime: null,
+    pollCount: 0,
+  };
+}
+
+// =============================================================================
+// Organization Mappings (Todoist Project ID -> GitHub Org)
+// =============================================================================
+
+/**
+ * Parse ORG_MAPPINGS environment variable
+ * Format: {"todoist-project-id": "github-org", ...}
+ * Returns Map of projectId -> githubOrg
+ */
+function parseOrgMappings(env) {
+  if (!env.ORG_MAPPINGS) {
+    // Fallback to legacy single-project mode
+    if (env.TODOIST_PROJECT_ID && env.GITHUB_ORG) {
+      console.log('Using legacy single-project mode (TODOIST_PROJECT_ID + GITHUB_ORG)');
+      return new Map([[env.TODOIST_PROJECT_ID, env.GITHUB_ORG]]);
+    }
+    console.warn('No ORG_MAPPINGS configured');
+    return new Map();
+  }
+
+  try {
+    const mappings = JSON.parse(env.ORG_MAPPINGS);
+    const map = new Map(Object.entries(mappings));
+    console.log(`Loaded ${map.size} org mapping(s)`);
+    return map;
+  } catch (error) {
+    console.error('Failed to parse ORG_MAPPINGS:', error);
+    return new Map();
+  }
+}
+
+/**
+ * Fetch all Todoist projects using Sync API
+ * Returns array of project objects with id, name, parent_id
+ */
+async function fetchTodoistProjects(env) {
+  const response = await fetch('https://api.todoist.com/sync/v9/sync', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      sync_token: '*',
+      resource_types: '["projects"]',
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Todoist Sync API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.projects || [];
+}
+
+/**
+ * Build project hierarchy from org mappings
+ * Returns object with:
+ *   - parentProjects: Map of projectId -> { id, name, githubOrg }
+ *   - subProjects: Map of projectId -> { id, name, parentId, repoName, githubOrg }
+ *   - repoToProject: Map of "owner/repo" -> projectId (for task creation)
+ */
+function buildProjectHierarchy(projects, orgMappings) {
+  const parentProjects = new Map();
+  const subProjects = new Map();
+  const repoToProject = new Map();
+
+  // First pass: identify parent projects from org mappings
+  for (const project of projects) {
+    const projectId = String(project.id);
+    if (orgMappings.has(projectId)) {
+      parentProjects.set(projectId, {
+        id: projectId,
+        name: project.name,
+        githubOrg: orgMappings.get(projectId),
+      });
+    }
+  }
+
+  // Second pass: identify sub-projects (children of parent projects)
+  for (const project of projects) {
+    const parentId = project.parent_id ? String(project.parent_id) : null;
+    if (parentId && parentProjects.has(parentId)) {
+      const parent = parentProjects.get(parentId);
+      const projectId = String(project.id);
+      const repoName = project.name;
+      const fullRepo = `${parent.githubOrg}/${repoName}`;
+
+      subProjects.set(projectId, {
+        id: projectId,
+        name: repoName,
+        parentId: parentId,
+        repoName: repoName,
+        githubOrg: parent.githubOrg,
+        fullRepo: fullRepo,
+      });
+
+      repoToProject.set(fullRepo, projectId);
+    }
+  }
+
+  console.log(`Found ${parentProjects.size} parent project(s), ${subProjects.size} sub-project(s)`);
+  return { parentProjects, subProjects, repoToProject };
+}
+
+// =============================================================================
+// GitHub Polling
+// =============================================================================
+
+/**
+ * Poll GitHub for issues updated since last sync
+ * Uses project hierarchy to determine which repos to sync
+ * Returns array of issues with their current state and target project info
+ */
+async function pollGitHubChanges(env, since, projectHierarchy) {
+  const issues = [];
+  const { subProjects } = projectHierarchy;
+
+  // Get unique repos from sub-projects
+  const repos = Array.from(subProjects.values()).map(p => ({
+    owner: p.githubOrg,
+    name: p.repoName,
+    projectId: p.id,
+  }));
+
+  console.log(`Polling ${repos.length} repo(s) from Todoist project hierarchy`);
+
+  for (const repo of repos) {
+    try {
+      const repoIssues = await fetchGitHubIssuesSince(env, repo.owner, repo.name, since);
+      // Add project info to each issue
+      for (const issue of repoIssues) {
+        issue._todoistProjectId = repo.projectId;
+      }
+      issues.push(...repoIssues);
+    } catch (error) {
+      console.error(`Failed to fetch issues from ${repo.owner}/${repo.name}:`, error);
+      // Continue with other repos
+    }
+  }
+
+  return issues;
+}
+
+/**
+ * Fetch GitHub issues updated since a given timestamp
+ */
+async function fetchGitHubIssuesSince(env, owner, repo, since) {
+  const issues = [];
+  let page = 1;
+
+  while (true) {
+    const params = new URLSearchParams({
+      state: 'all', // Get both open and closed issues
+      sort: 'updated',
+      direction: 'asc',
+      per_page: '100',
+      page: String(page),
+    });
+
+    if (since) {
+      params.set('since', since);
+    }
+
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues?${params}`,
+      {
+        headers: {
+          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'GitHub-Todoist-Sync-Worker',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`GitHub API error: ${response.status} - ${errorText}`);
+    }
+
+    const pageIssues = await response.json();
+
+    for (const issue of pageIssues) {
+      // Skip pull requests (they appear in issues API)
+      if (issue.pull_request) continue;
+
+      // Add repo info for context
+      issues.push({
+        ...issue,
+        _repoOwner: owner,
+        _repoName: repo,
+        _repoFullName: `${owner}/${repo}`,
+      });
+    }
+
+    // No more pages if we got fewer than 100
+    if (pageIssues.length < 100) break;
+    page++;
+  }
+
+  return issues;
+}
+
+// =============================================================================
+// Todoist Polling (using Sync API)
+// =============================================================================
+
+/**
+ * Poll Todoist for task changes using the Sync API
+ * Filters to only tasks in sub-projects from the project hierarchy
+ */
+async function pollTodoistChanges(env, syncToken, projectHierarchy) {
+  const response = await fetch('https://api.todoist.com/sync/v9/sync', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      sync_token: syncToken,
+      resource_types: '["items"]',
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Todoist Sync API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  const { subProjects } = projectHierarchy;
+
+  // Filter to only tasks in sub-projects (repos)
+  const projectTasks = (data.items || []).filter((item) => {
+    const projectId = String(item.project_id);
+    return subProjects.has(projectId);
+  });
+
+  // Enrich tasks with repo info from project hierarchy
+  for (const task of projectTasks) {
+    const projectId = String(task.project_id);
+    const subProject = subProjects.get(projectId);
+    if (subProject) {
+      task._githubOrg = subProject.githubOrg;
+      task._repoName = subProject.repoName;
+      task._fullRepo = subProject.fullRepo;
+    }
+  }
+
+  return {
+    tasks: projectTasks,
+    newSyncToken: data.sync_token,
+    fullSync: data.full_sync || false,
+  };
+}
+
+/**
+ * Get a single Todoist task by ID using REST API
+ * Used to get current state of a task during reconciliation
+ */
+async function getTodoistTask(env, taskId) {
+  const response = await fetch(
+    `https://api.todoist.com/rest/v2/tasks/${taskId}`,
+    {
+      headers: { Authorization: `Bearer ${env.TODOIST_API_TOKEN}` },
+    }
+  );
+
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    const errorText = await response.text();
+    throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+// =============================================================================
+// Reconciliation Logic
+// =============================================================================
+
+/**
+ * Sync a GitHub issue to Todoist
+ * Creates task if missing, updates state if changed
+ * Uses _todoistProjectId from issue to determine which sub-project to create task in
+ */
+async function syncIssueToTodoist(env, issue) {
+  const issueUrl = issue.html_url;
+  const repoName = issue._repoName;
+  const repoFullName = issue._repoFullName;
+  const projectId = issue._todoistProjectId;
+
+  // Find existing task
+  const task = await findTodoistTaskByIssueUrl(env, issueUrl);
+
+  if (!task) {
+    // No task exists - create if issue is open
+    if (issue.state === 'open') {
+      console.log(`Creating task for open issue: ${repoFullName}#${issue.number} in project ${projectId}`);
+      await createTodoistTask(env, {
+        title: issue.title,
+        issueNumber: issue.number,
+        repoName: repoName,
+        repoFullName: repoFullName,
+        issueUrl: issueUrl,
+        projectId: projectId, // Create in the sub-project for this repo
+        labels: issue.labels?.map((l) => l.name) || [],
+      });
+      return { action: 'created', issue: `${repoFullName}#${issue.number}` };
+    }
+    return { action: 'skipped', reason: 'closed_no_task', issue: `${repoFullName}#${issue.number}` };
+  }
+
+  // Task exists - sync state
+  const taskCompleted = task.is_completed;
+
+  if (issue.state === 'closed' && !taskCompleted) {
+    console.log(`Completing task for closed issue: ${repoFullName}#${issue.number}`);
+    await completeTodoistTask(env, task.id);
+    return { action: 'completed', issue: `${repoFullName}#${issue.number}` };
+  }
+
+  if (issue.state === 'open' && taskCompleted) {
+    console.log(`Reopening task for reopened issue: ${repoFullName}#${issue.number}`);
+    await reopenTodoistTask(env, task.id);
+    return { action: 'reopened', issue: `${repoFullName}#${issue.number}` };
+  }
+
+  // Check for title changes
+  const expectedTitle = `[${repoName}#${issue.number}] ${issue.title}`;
+  if (task.content !== expectedTitle) {
+    console.log(`Updating task title for issue: ${repoFullName}#${issue.number}`);
+    await updateTodoistTask(env, task.id, { content: expectedTitle });
+    return { action: 'updated', issue: `${repoFullName}#${issue.number}` };
+  }
+
+  return { action: 'unchanged', issue: `${repoFullName}#${issue.number}` };
+}
+
+/**
+ * Sync a Todoist task to GitHub
+ * Uses project hierarchy to determine org/repo (from _githubOrg and _repoName added during polling)
+ * Falls back to parsing GitHub URL from description for tasks created from GitHub
+ */
+async function syncTaskToGitHub(env, task) {
+  // First check if task has GitHub URL (was created from GitHub issue)
+  const githubInfo = parseGitHubUrl(task.description);
+
+  if (githubInfo) {
+    // Task was created from GitHub - sync completion state back
+    const issue = await getGitHubIssue(env, githubInfo);
+    if (!issue) {
+      console.warn(`GitHub issue not found: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
+      return { action: 'skipped', reason: 'issue_not_found', taskId: task.id };
+    }
+
+    const taskCompleted = task.is_completed || task.checked === 1;
+
+    if (taskCompleted && issue.state === 'open') {
+      console.log(`Closing issue for completed task: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
+      await closeGitHubIssue(env, githubInfo);
+      return { action: 'closed', issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}` };
+    }
+
+    if (!taskCompleted && issue.state === 'closed') {
+      console.log(`Reopening issue for uncompleted task: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
+      await reopenGitHubIssue(env, githubInfo);
+      return { action: 'reopened', issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}` };
+    }
+
+    return { action: 'unchanged', taskId: task.id };
+  }
+
+  // No GitHub URL - task was created in Todoist, might need to create GitHub issue
+  // Use project hierarchy info (added during polling) to determine repo
+  if (!task._githubOrg || !task._repoName) {
+    return { action: 'skipped', reason: 'no_repo_info', taskId: task.id };
+  }
+
+  // Skip completed tasks - don't create closed issues
+  if (task.is_completed || task.checked === 1) {
+    return { action: 'skipped', reason: 'completed_no_issue', taskId: task.id };
+  }
+
+  // Create GitHub issue for this task
+  console.log(`Creating GitHub issue for task: ${task._fullRepo} - ${task.content}`);
+  try {
+    const issue = await createGitHubIssue(env, {
+      owner: task._githubOrg,
+      repo: task._repoName,
+      title: task.content,
+      body: task.description || `Created from Todoist task: ${task.id}`,
+    });
+
+    // Update task description with GitHub URL (for bidirectional sync)
+    await updateTodoistTaskDescription(env, task.id, issue.html_url);
+    console.log(`Created GitHub issue: ${issue.html_url}`);
+
+    return { action: 'created_issue', issue: issue.html_url, taskId: task.id };
+  } catch (error) {
+    console.error(`Failed to create GitHub issue for task ${task.id}:`, error);
+    return { action: 'error', error: error.message, taskId: task.id };
+  }
+}
+
+/**
+ * Get a GitHub issue by owner/repo/number
+ */
+async function getGitHubIssue(env, { owner, repo, issueNumber }) {
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
+    {
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'GitHub-Todoist-Sync-Worker',
+      },
+    }
+  );
+
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    const errorText = await response.text();
+    throw new Error(`GitHub API error: ${response.status} - ${errorText}`);
+  }
+
+  return response.json();
+}
+
+// =============================================================================
+// Bidirectional Sync Orchestrator
+// =============================================================================
+
+/**
+ * Perform bidirectional sync between GitHub and Todoist
+ * Called by the scheduled handler
+ *
+ * Uses Todoist project hierarchy to determine which repos to sync:
+ * - Parent projects map to GitHub organizations (via ORG_MAPPINGS)
+ * - Sub-projects map to repositories (sub-project name = repo name)
+ */
+async function performBidirectionalSync(env) {
+  console.log('Starting bidirectional sync...');
+  const startTime = Date.now();
+
+  // Load current sync state
+  const state = await loadSyncState(env);
+  console.log(`Last sync: ${state.lastPollTime || 'never'}, Poll count: ${state.pollCount}`);
+
+  const results = {
+    github: { processed: 0, created: 0, updated: 0, completed: 0, reopened: 0, errors: 0 },
+    todoist: { processed: 0, closed: 0, reopened: 0, created_issues: 0, errors: 0 },
+  };
+
+  try {
+    // Parse org mappings and build project hierarchy
+    const orgMappings = parseOrgMappings(env);
+    if (orgMappings.size === 0) {
+      console.warn('No org mappings configured, skipping sync');
+      return { success: false, error: 'No ORG_MAPPINGS configured', results };
+    }
+
+    // Fetch Todoist projects and build hierarchy
+    console.log('Fetching Todoist project hierarchy...');
+    const projects = await fetchTodoistProjects(env);
+    const projectHierarchy = buildProjectHierarchy(projects, orgMappings);
+
+    if (projectHierarchy.subProjects.size === 0) {
+      console.warn('No sub-projects found under mapped parent projects');
+      return { success: true, duration: Date.now() - startTime, results, warning: 'No repos configured' };
+    }
+
+    // Poll GitHub for changes
+    console.log(`Polling GitHub for issues updated since: ${state.lastGitHubSync || 'beginning'}`);
+    const githubIssues = await pollGitHubChanges(env, state.lastGitHubSync, projectHierarchy);
+    console.log(`Found ${githubIssues.length} GitHub issues to process`);
+
+    // Process GitHub -> Todoist sync
+    for (const issue of githubIssues) {
+      try {
+        const result = await syncIssueToTodoist(env, issue);
+        results.github.processed++;
+        if (result.action === 'created') results.github.created++;
+        else if (result.action === 'updated') results.github.updated++;
+        else if (result.action === 'completed') results.github.completed++;
+        else if (result.action === 'reopened') results.github.reopened++;
+      } catch (error) {
+        console.error(`Error syncing issue ${issue._repoFullName}#${issue.number}:`, error);
+        results.github.errors++;
+      }
+    }
+
+    // Poll Todoist for changes
+    console.log(`Polling Todoist with sync token: ${state.todoistSyncToken === '*' ? 'full sync' : 'incremental'}`);
+    const { tasks: todoistTasks, newSyncToken, fullSync } = await pollTodoistChanges(env, state.todoistSyncToken, projectHierarchy);
+    console.log(`Found ${todoistTasks.length} Todoist tasks to process (full_sync: ${fullSync})`);
+
+    // Process Todoist -> GitHub sync
+    for (const task of todoistTasks) {
+      try {
+        const result = await syncTaskToGitHub(env, task);
+        results.todoist.processed++;
+        if (result.action === 'closed') results.todoist.closed++;
+        else if (result.action === 'reopened') results.todoist.reopened++;
+        else if (result.action === 'created_issue') results.todoist.created_issues++;
+      } catch (error) {
+        console.error(`Error syncing task ${task.id}:`, error);
+        results.todoist.errors++;
+      }
+    }
+
+    // Save updated sync state
+    const newState = {
+      lastGitHubSync: new Date().toISOString(),
+      todoistSyncToken: newSyncToken,
+      lastPollTime: new Date().toISOString(),
+      pollCount: state.pollCount + 1,
+    };
+    await saveSyncState(env, newState);
+
+    const duration = Date.now() - startTime;
+    console.log(`Sync completed in ${duration}ms:`, JSON.stringify(results));
+
+    return { success: true, duration, results };
+  } catch (error) {
+    console.error('Sync failed:', error);
+    return { success: false, error: error.message, results };
+  }
+}
+
+/**
+ * Handle GET /sync-status request
+ * Returns current sync state and health information
+ */
+async function handleSyncStatus(env) {
+  try {
+    const state = await loadSyncState(env);
+
+    const now = new Date();
+    const lastPollDate = state.lastPollTime ? new Date(state.lastPollTime) : null;
+    const timeSinceLastPoll = lastPollDate
+      ? Math.round((now - lastPollDate) / 1000 / 60)
+      : null;
+
+    const status = {
+      status: 'healthy',
+      lastSync: state.lastPollTime || 'never',
+      lastGitHubSync: state.lastGitHubSync || 'never',
+      todoistSyncTokenAge: state.todoistSyncToken === '*' ? 'full sync pending' : 'incremental',
+      pollCount: state.pollCount,
+      timeSinceLastPollMinutes: timeSinceLastPoll,
+      pollingEnabled: true,
+      pollingIntervalMinutes: 15,
+    };
+
+    // Mark as unhealthy if last poll was more than 30 minutes ago
+    if (timeSinceLastPoll !== null && timeSinceLastPoll > 30) {
+      status.status = 'degraded';
+      status.warning = 'Last sync was more than 30 minutes ago';
+    }
+
+    return new Response(JSON.stringify(status, null, 2), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    console.error('Failed to get sync status:', error);
+    return new Response(
+      JSON.stringify({ status: 'error', error: error.message }),
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+}
+
+// =============================================================================
 // Main Worker Export
 // =============================================================================
 
@@ -367,14 +919,6 @@ export default {
     const baseUrl = `${url.protocol}//${url.host}`;
 
     // Route requests
-    if (request.method === 'POST' && url.pathname === '/github-webhook') {
-      return handleGitHubWebhook(request, env, ctx);
-    }
-
-    if (request.method === 'POST' && url.pathname === '/todoist-webhook') {
-      return handleTodoistWebhook(request, env, ctx);
-    }
-
     if (request.method === 'POST' && url.pathname === '/backfill') {
       return handleBackfill(request, env, ctx);
     }
@@ -386,6 +930,11 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         }
       );
+    }
+
+    // Sync status endpoint
+    if (request.method === 'GET' && url.pathname === '/sync-status') {
+      return handleSyncStatus(env);
     }
 
     // Swagger UI
@@ -412,267 +961,28 @@ export default {
 
     return new Response('Not Found', { status: 404 });
   },
+
+  /**
+   * Scheduled handler for cron-triggered polling sync
+   * Runs every 15 minutes to sync GitHub issues and Todoist tasks
+   */
+  async scheduled(controller, env, ctx) {
+    console.log('Cron trigger fired at', new Date().toISOString());
+
+    try {
+      const result = await performBidirectionalSync(env);
+      console.log('Scheduled sync result:', JSON.stringify(result));
+    } catch (error) {
+      console.error('Scheduled sync failed:', error);
+      // Don't throw - let the cron job complete even if sync fails
+      // Errors are logged and will be visible in Cloudflare dashboard
+    }
+  },
 };
 
 // =============================================================================
-// GitHub Webhook Handler
+// Shared Helper Functions
 // =============================================================================
-
-async function handleGitHubWebhook(request, env, ctx) {
-  const body = await request.text();
-  const deliveryId = request.headers.get('X-GitHub-Delivery');
-
-  // Idempotency check - prevent duplicate processing
-  if (await isWebhookProcessed(env, `github:${deliveryId}`)) {
-    console.log(`Duplicate GitHub webhook: ${deliveryId}`);
-    return jsonResponse({ message: 'Already processed', deliveryId }, 200);
-  }
-
-  // Validate signature
-  const signature = request.headers.get('X-Hub-Signature-256');
-  if (
-    !signature ||
-    !(await verifyGitHubSignature(body, signature, env.GITHUB_WEBHOOK_SECRET))
-  ) {
-    console.error('GitHub webhook signature validation failed');
-    return new Response('Unauthorized', { status: 401 });
-  }
-
-  const event = request.headers.get('X-GitHub-Event');
-
-  // Parse JSON with error handling
-  let payload;
-  try {
-    payload = JSON.parse(body);
-  } catch (e) {
-    console.error('Invalid JSON payload:', e.message);
-    return jsonResponse({ error: 'Invalid JSON payload' }, 400);
-  }
-
-  // Only handle issue events
-  if (event !== 'issues') {
-    return jsonResponse({ message: 'Event ignored', event }, 200);
-  }
-
-  const issue = payload.issue;
-  const repo = payload.repository;
-  let response;
-
-  // Handle issue opened -> create Todoist task
-  if (payload.action === 'opened') {
-    response = await handleIssueOpened(env, issue, repo);
-  }
-  // Handle issue closed -> complete Todoist task
-  else if (payload.action === 'closed') {
-    response = await handleIssueClosed(env, issue, repo);
-  }
-  // Handle issue edited -> update Todoist task
-  else if (payload.action === 'edited') {
-    response = await handleIssueEdited(env, issue, repo, payload.changes);
-  }
-  // Handle issue reopened -> reopen Todoist task
-  else if (payload.action === 'reopened') {
-    response = await handleIssueReopened(env, issue, repo);
-  }
-  // Ignore other issue actions (assigned, labeled, etc.)
-  else {
-    response = jsonResponse(
-      { message: 'Event ignored', event, action: payload.action },
-      200
-    );
-  }
-
-  // Mark webhook as processed in the background (non-blocking)
-  // This ensures the response is returned quickly while KV write completes
-  ctx.waitUntil(markWebhookProcessed(env, `github:${deliveryId}`));
-  return response;
-}
-
-/**
- * Handle GitHub issue opened event -> Create Todoist task
- */
-async function handleIssueOpened(env, issue, repo) {
-  console.log(
-    `Processing new issue: ${repo.full_name}#${issue.number} - ${issue.title}`
-  );
-
-  // Optional: Filter by repo, label, or assignee
-  // Uncomment and customize the shouldSyncIssue function below if needed
-  // if (!shouldSyncIssue(issue, repo, env)) {
-  //   return jsonResponse({ message: 'Issue filtered out' }, 200);
-  // }
-
-  try {
-    // Check for duplicate task
-    if (await taskExistsForIssue(env, issue.html_url)) {
-      console.log(`Task already exists for issue ${repo.full_name}#${issue.number}`);
-      return jsonResponse(
-        {
-          message: 'Task already exists',
-          issue: `${repo.full_name}#${issue.number}`,
-        },
-        200
-      );
-    }
-
-    const task = await createTodoistTask(env, {
-      title: issue.title,
-      issueNumber: issue.number,
-      repoName: repo.name,
-      repoFullName: repo.full_name,
-      issueUrl: issue.html_url,
-      labels: issue.labels?.map((l) => l.name) || [],
-    });
-
-    console.log(`Created Todoist task: ${task.id}`);
-
-    return jsonResponse(
-      {
-        message: 'Task created',
-        taskId: task.id,
-        issue: `${repo.full_name}#${issue.number}`,
-      },
-      201
-    );
-  } catch (error) {
-    console.error('Failed to create Todoist task:', error);
-    return jsonResponse(
-      { error: 'Failed to create task', details: error.message },
-      500
-    );
-  }
-}
-
-/**
- * Handle GitHub issue closed event -> Complete Todoist task
- */
-async function handleIssueClosed(env, issue, repo) {
-  console.log(
-    `Processing closed issue: ${repo.full_name}#${issue.number} - ${issue.title}`
-  );
-
-  try {
-    const task = await findTodoistTaskByIssueUrl(env, issue.html_url);
-
-    if (!task) {
-      console.log(`No Todoist task found for issue ${repo.full_name}#${issue.number}`);
-      return jsonResponse(
-        {
-          message: 'No task found for issue',
-          issue: `${repo.full_name}#${issue.number}`,
-        },
-        200
-      );
-    }
-
-    await completeTodoistTask(env, task.id);
-    console.log(`Completed Todoist task: ${task.id}`);
-
-    return jsonResponse(
-      {
-        message: 'Task completed',
-        taskId: task.id,
-        issue: `${repo.full_name}#${issue.number}`,
-      },
-      200
-    );
-  } catch (error) {
-    console.error('Failed to complete Todoist task:', error);
-    return jsonResponse(
-      { error: 'Failed to complete task', details: error.message },
-      500
-    );
-  }
-}
-
-/**
- * Handle GitHub issue edited event -> Update Todoist task
- */
-async function handleIssueEdited(env, issue, repo, changes) {
-  console.log(
-    `Processing edited issue: ${repo.full_name}#${issue.number} - ${issue.title}`
-  );
-
-  try {
-    const task = await findTodoistTaskByIssueUrl(env, issue.html_url);
-
-    if (!task) {
-      console.log(`No Todoist task found for issue ${repo.full_name}#${issue.number}`);
-      return jsonResponse(
-        {
-          message: 'No task found for issue',
-          issue: `${repo.full_name}#${issue.number}`,
-        },
-        200
-      );
-    }
-
-    // Only update if title changed
-    if (changes?.title) {
-      await updateTodoistTask(env, task.id, {
-        content: `[${repo.name}#${issue.number}] ${issue.title}`,
-      });
-      console.log(`Updated Todoist task: ${task.id}`);
-    }
-
-    return jsonResponse(
-      {
-        message: 'Task updated',
-        taskId: task.id,
-        issue: `${repo.full_name}#${issue.number}`,
-      },
-      200
-    );
-  } catch (error) {
-    console.error('Failed to update Todoist task:', error);
-    return jsonResponse(
-      { error: 'Failed to update task', details: error.message },
-      500
-    );
-  }
-}
-
-/**
- * Handle GitHub issue reopened event -> Reopen Todoist task
- */
-async function handleIssueReopened(env, issue, repo) {
-  console.log(
-    `Processing reopened issue: ${repo.full_name}#${issue.number} - ${issue.title}`
-  );
-
-  try {
-    const task = await findTodoistTaskByIssueUrl(env, issue.html_url);
-
-    if (!task) {
-      console.log(`No Todoist task found for issue ${repo.full_name}#${issue.number}`);
-      return jsonResponse(
-        {
-          message: 'No task found for issue',
-          issue: `${repo.full_name}#${issue.number}`,
-        },
-        200
-      );
-    }
-
-    await reopenTodoistTask(env, task.id);
-    console.log(`Reopened Todoist task: ${task.id}`);
-
-    return jsonResponse(
-      {
-        message: 'Task reopened',
-        taskId: task.id,
-        issue: `${repo.full_name}#${issue.number}`,
-      },
-      200
-    );
-  } catch (error) {
-    console.error('Failed to reopen Todoist task:', error);
-    return jsonResponse(
-      { error: 'Failed to reopen task', details: error.message },
-      500
-    );
-  }
-}
 
 /**
  * Helper to create JSON responses
@@ -686,12 +996,13 @@ function jsonResponse(data, status = 200) {
 
 async function createTodoistTask(
   env,
-  { title, issueNumber, repoName, repoFullName, issueUrl, labels }
+  { title, issueNumber, repoName, repoFullName, issueUrl, projectId, labels }
 ) {
   const taskData = {
     content: `[${repoName}#${issueNumber}] ${title}`,
     description: issueUrl,
-    project_id: env.TODOIST_PROJECT_ID,
+    // Use provided projectId (from sub-project) or fall back to legacy env var
+    project_id: projectId || env.TODOIST_PROJECT_ID,
   };
 
   // Optional: Map GitHub labels to Todoist priority
@@ -832,189 +1143,8 @@ async function reopenTodoistTask(env, taskId) {
 }
 
 // =============================================================================
-// Todoist Webhook Handler
+// GitHub URL Parsing and API Functions
 // =============================================================================
-
-async function handleTodoistWebhook(request, env, ctx) {
-  const body = await request.text();
-  const deliveryId = request.headers.get('X-Todoist-Delivery-ID');
-
-  // Idempotency check - prevent duplicate processing
-  if (await isWebhookProcessed(env, `todoist:${deliveryId}`)) {
-    console.log(`Duplicate Todoist webhook: ${deliveryId}`);
-    return jsonResponse({ message: 'Already processed', deliveryId }, 200);
-  }
-
-  // Validate signature
-  const signature = request.headers.get('X-Todoist-Hmac-SHA256');
-  if (
-    !signature ||
-    !(await verifyTodoistSignature(body, signature, env.TODOIST_WEBHOOK_SECRET))
-  ) {
-    console.error('Todoist webhook signature validation failed');
-    return new Response('Unauthorized', { status: 401 });
-  }
-
-  // Parse JSON with error handling
-  let payload;
-  try {
-    payload = JSON.parse(body);
-  } catch (e) {
-    console.error('Invalid JSON payload:', e.message);
-    return jsonResponse({ error: 'Invalid JSON payload' }, 400);
-  }
-
-  const task = payload.event_data;
-  let response;
-
-  // Handle item:added -> create GitHub issue
-  if (payload.event_name === 'item:added') {
-    response = await handleTaskAdded(env, task);
-  }
-  // Handle item:completed -> close GitHub issue
-  else if (payload.event_name === 'item:completed') {
-    response = await handleTaskCompleted(env, task);
-  }
-  // Handle item:updated -> update GitHub issue
-  else if (payload.event_name === 'item:updated') {
-    response = await handleTaskUpdated(env, task, payload.event_data_extra);
-  }
-  // Handle item:uncompleted -> reopen GitHub issue
-  else if (payload.event_name === 'item:uncompleted') {
-    response = await handleTaskUncompleted(env, task);
-  }
-  // Ignore other events
-  else {
-    response = jsonResponse({ message: 'Event ignored', event: payload.event_name }, 200);
-  }
-
-  // Mark webhook as processed in the background (non-blocking)
-  // This ensures the response is returned quickly while KV write completes
-  ctx.waitUntil(markWebhookProcessed(env, `todoist:${deliveryId}`));
-  return response;
-}
-
-/**
- * Handle Todoist task completed event -> Close GitHub issue
- */
-async function handleTaskCompleted(env, task) {
-  console.log(`Processing completed task: ${task.id} - ${task.content}`);
-
-  // Extract GitHub URL from task description
-  const githubInfo = parseGitHubUrl(task.description);
-
-  if (!githubInfo) {
-    console.log('No GitHub URL found in task description, skipping');
-    return jsonResponse({ message: 'No GitHub URL in task, skipped' }, 200);
-  }
-
-  console.log(
-    `Closing GitHub issue: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`
-  );
-
-  try {
-    await closeGitHubIssue(env, githubInfo);
-
-    return jsonResponse(
-      {
-        message: 'Issue closed',
-        issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`,
-      },
-      200
-    );
-  } catch (error) {
-    console.error('Failed to close GitHub issue:', error);
-    return jsonResponse(
-      { error: 'Failed to close issue', details: error.message },
-      500
-    );
-  }
-}
-
-/**
- * Handle Todoist task updated event -> Update GitHub issue
- */
-async function handleTaskUpdated(env, task, extraData) {
-  console.log(`Processing updated task: ${task.id} - ${task.content}`);
-
-  // Extract GitHub URL from task description
-  const githubInfo = parseGitHubUrl(task.description);
-
-  if (!githubInfo) {
-    console.log('No GitHub URL found in task description, skipping');
-    return jsonResponse({ message: 'No GitHub URL in task, skipped' }, 200);
-  }
-
-  // Check if content actually changed (not just completion status)
-  // event_data_extra contains previous state
-  if (!extraData?.old_item?.content || extraData.old_item.content === task.content) {
-    console.log('Task content unchanged, skipping');
-    return jsonResponse({ message: 'Content unchanged, skipped' }, 200);
-  }
-
-  console.log(
-    `Updating GitHub issue: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`
-  );
-
-  try {
-    // Strip the [repo#issue] prefix before updating GitHub
-    const cleanTitle = stripTodoistPrefix(task.content);
-    await updateGitHubIssue(env, githubInfo, {
-      title: cleanTitle,
-    });
-
-    return jsonResponse(
-      {
-        message: 'Issue updated',
-        issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`,
-      },
-      200
-    );
-  } catch (error) {
-    console.error('Failed to update GitHub issue:', error);
-    return jsonResponse(
-      { error: 'Failed to update issue', details: error.message },
-      500
-    );
-  }
-}
-
-/**
- * Handle Todoist task uncompleted event -> Reopen GitHub issue
- */
-async function handleTaskUncompleted(env, task) {
-  console.log(`Processing uncompleted task: ${task.id} - ${task.content}`);
-
-  // Extract GitHub URL from task description
-  const githubInfo = parseGitHubUrl(task.description);
-
-  if (!githubInfo) {
-    console.log('No GitHub URL found in task description, skipping');
-    return jsonResponse({ message: 'No GitHub URL in task, skipped' }, 200);
-  }
-
-  console.log(
-    `Reopening GitHub issue: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`
-  );
-
-  try {
-    await reopenGitHubIssue(env, githubInfo);
-
-    return jsonResponse(
-      {
-        message: 'Issue reopened',
-        issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`,
-      },
-      200
-    );
-  } catch (error) {
-    console.error('Failed to reopen GitHub issue:', error);
-    return jsonResponse(
-      { error: 'Failed to reopen issue', details: error.message },
-      500
-    );
-  }
-}
 
 function parseGitHubUrl(description) {
   if (!description) return null;
@@ -1033,16 +1163,6 @@ function parseGitHubUrl(description) {
   };
 }
 
-/**
- * Strip the [repo#issue] prefix from Todoist task content
- * Pattern: [repo-name#123] Title here -> Title here
- */
-function stripTodoistPrefix(content) {
-  if (!content) return content;
-  // Match: [repo-name#123] or [owner/repo#123] at the start
-  return content.replace(/^\[[\w./-]+#\d+\]\s*/, '');
-}
-
 async function closeGitHubIssue(env, { owner, repo, issueNumber }) {
   return withRetry(async () => {
     const response = await fetch(
@@ -1059,34 +1179,6 @@ async function closeGitHubIssue(env, { owner, repo, issueNumber }) {
           state: 'closed',
           state_reason: 'completed',
         }),
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`GitHub API error: ${response.status} - ${errorText}`);
-    }
-
-    return response.json();
-  });
-}
-
-/**
- * Update a GitHub issue
- */
-async function updateGitHubIssue(env, { owner, repo, issueNumber }, updates) {
-  return withRetry(async () => {
-    const response = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
-      {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-          Accept: 'application/vnd.github.v3+json',
-          'User-Agent': 'GitHub-Todoist-Sync-Worker',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updates),
       }
     );
 
@@ -1179,103 +1271,6 @@ async function updateTodoistTaskDescription(env, taskId, description) {
       throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
     }
   });
-}
-
-/**
- * Extract owner/repo from task labels
- * Supports two formats:
- *   - "owner/repo" → returns { owner, repo }
- *   - "repo" → returns { owner: null, repo } (will use GITHUB_ORG as owner)
- * Returns null if no valid repo label found
- */
-function getRepoFromLabels(labels) {
-  if (!labels || labels.length === 0) return null;
-
-  // Skip common non-repo labels
-  const skipLabels = ['github', 'sync', 'todo', 'task', 'urgent', 'high', 'medium', 'low'];
-
-  // First pass: look for explicit owner/repo labels
-  // Supports dashes, underscores, and dots in names (e.g., my_org/repo.js)
-  for (const label of labels) {
-    const match = label.match(/^([\w.-]+)\/([\w.-]+)$/);
-    if (match) {
-      return { owner: match[1], repo: match[2] };
-    }
-  }
-
-  // Second pass: look for simple repo names
-  for (const label of labels) {
-    const labelLower = label.toLowerCase();
-    if (!skipLabels.includes(labelLower) && /^[\w.-]+$/.test(label)) {
-      return { owner: null, repo: label };
-    }
-  }
-
-  return null;
-}
-
-/**
- * Handle Todoist task added event -> Create GitHub issue
- */
-async function handleTaskAdded(env, task) {
-  console.log(`Processing new task: ${task.id} - ${task.content}`);
-
-  // Loop prevention: skip if task already has a GitHub URL (was created from GitHub)
-  if (task.description && task.description.includes('github.com')) {
-    console.log('Task already has GitHub URL, skipping (likely created from GitHub)');
-    return jsonResponse({ message: 'Task has GitHub URL, skipped (loop prevention)' }, 200);
-  }
-
-  // Get owner/repo from task labels
-  const repoInfo = getRepoFromLabels(task.labels);
-
-  if (!repoInfo) {
-    console.log('No repo label found on task, skipping');
-    return jsonResponse({ message: 'No repo label found, skipped' }, 200);
-  }
-
-  // Determine owner: use explicit owner from label, or fall back to GITHUB_ORG
-  const owner = repoInfo.owner || env.GITHUB_ORG;
-
-  if (!owner) {
-    console.log('No owner specified and GITHUB_ORG not configured, skipping');
-    return jsonResponse({ message: 'No owner specified and GITHUB_ORG not configured, skipped' }, 200);
-  }
-
-  const repo = repoInfo.repo;
-  console.log(`Creating GitHub issue in ${owner}/${repo}`);
-
-  try {
-    // Create the GitHub issue
-    const issue = await createGitHubIssue(env, {
-      owner: owner,
-      repo: repo,
-      title: task.content,
-      body: task.description || `Created from Todoist task: ${task.id}`,
-    });
-
-    console.log(`Created GitHub issue: ${issue.html_url}`);
-
-    // Update the Todoist task description with the issue URL
-    await updateTodoistTaskDescription(env, task.id, issue.html_url);
-    console.log(`Updated Todoist task ${task.id} with issue URL`);
-
-    return jsonResponse(
-      {
-        message: 'Issue created',
-        issueUrl: issue.html_url,
-        issueNumber: issue.number,
-        taskId: task.id,
-      },
-      201
-    );
-  } catch (error) {
-    console.error('Failed to create GitHub issue:', error);
-    return jsonResponse(
-      { error: 'Failed to create issue', details: error.message },
-      500
-    );
-  }
 }
 
 // =============================================================================
@@ -1674,58 +1669,12 @@ async function handleBackfill(request, env, ctx) {
 }
 
 // =============================================================================
-// Signature Verification
+// Utility Functions for Authentication
 // =============================================================================
 
-async function verifyGitHubSignature(payload, signature, secret) {
-  // GitHub sends: sha256=<hex-digest>
-  const expectedSig = signature.replace('sha256=', '');
-  const computed = await hmacSha256Hex(payload, secret);
-  return timingSafeEqual(expectedSig, computed);
-}
-
-async function verifyTodoistSignature(payload, signature, secret) {
-  // Todoist sends: base64-encoded HMAC-SHA256
-  const computed = await hmacSha256Base64(payload, secret);
-  return timingSafeEqual(signature, computed);
-}
-
-async function hmacSha256Hex(message, secret) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const signature = await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(message)
-  );
-  return Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-async function hmacSha256Base64(message, secret) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
-
-  const signature = await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(message)
-  );
-  return btoa(String.fromCharCode(...new Uint8Array(signature)));
-}
-
+/**
+ * Timing-safe string comparison to prevent timing attacks
+ */
 function timingSafeEqual(a, b) {
   if (a.length !== b.length) return false;
 
@@ -1735,37 +1684,3 @@ function timingSafeEqual(a, b) {
   }
   return result === 0;
 }
-
-// =============================================================================
-// Optional: Filtering and Priority Mapping
-// =============================================================================
-
-/**
- * Uncomment and customize to filter which issues get synced
- */
-// function shouldSyncIssue(issue, repo, env) {
-//   // Only sync issues from specific repos
-//   const allowedRepos = ['my-repo', 'another-repo'];
-//   if (!allowedRepos.includes(repo.name)) {
-//     return false;
-//   }
-//
-//   // Only sync issues with specific labels
-//   const syncLabels = ['todo', 'task'];
-//   const hasLabel = issue.labels?.some((l) => syncLabels.includes(l.name));
-//   if (!hasLabel) {
-//     return false;
-//   }
-//
-//   return true;
-// }
-
-/**
- * Map GitHub labels to Todoist priority (1-4, where 4 is highest)
- */
-// function getPriority(labels) {
-//   if (labels.includes('urgent') || labels.includes('critical')) return 4;
-//   if (labels.includes('high')) return 3;
-//   if (labels.includes('medium')) return 2;
-//   return 1;
-// }

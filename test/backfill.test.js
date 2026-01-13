@@ -8,7 +8,8 @@ import {
 import worker from '../src/worker.js';
 
 // Helper to create backfill request with Bearer auth
-function createBackfillRequest(body, secret = env.GITHUB_WEBHOOK_SECRET) {
+// Uses BACKFILL_SECRET if available, otherwise falls back to GITHUB_WEBHOOK_SECRET
+function createBackfillRequest(body, secret = env.BACKFILL_SECRET || env.GITHUB_WEBHOOK_SECRET) {
   return new Request('http://localhost/backfill', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -87,7 +88,7 @@ describe('Backfill Request Validation', () => {
       method: 'POST',
       body: 'invalid json',
       headers: {
-        Authorization: `Bearer ${env.GITHUB_WEBHOOK_SECRET}`,
+        Authorization: `Bearer ${env.BACKFILL_SECRET || env.GITHUB_WEBHOOK_SECRET}`,
         'Content-Type': 'application/json',
       },
     });

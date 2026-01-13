@@ -1,31 +1,51 @@
 # GitHub ↔ Todoist Sync
 
-A Cloudflare Worker that provides **full bidirectional synchronization** between GitHub issues and Todoist tasks. Create issues or tasks on either platform and they stay in sync automatically.
+A Cloudflare Worker that provides **bidirectional synchronization** between GitHub issues and Todoist tasks using polling-based sync. No webhooks required - sync runs automatically every 15 minutes.
 
 ## Features
 
 | GitHub Action | Todoist Result |
 |---------------|----------------|
-| Issue opened | Task created |
+| Issue opened | Task created in sub-project |
 | Issue closed | Task completed |
-| Issue edited | Task title updated |
 | Issue reopened | Task reopened |
 
 | Todoist Action | GitHub Result |
 |----------------|---------------|
-| Task created (with repo label) | Issue created |
+| Task created (in sub-project) | Issue created in corresponding repo |
 | Task completed | Issue closed |
-| Task updated | Issue title updated |
 | Task uncompleted | Issue reopened |
 
 **Additional features:**
 
-- **Label-based repo routing** - Create tasks in Todoist with a label matching a repo name (e.g., `my-repo` or `owner/repo`) to create issues in the correct repository
+- **Project-based repo routing** - Use Todoist project hierarchy to define which repos to sync
+- **Multi-org support** - Map multiple Todoist parent projects to different GitHub organizations
 - **Duplicate prevention** - Checks for existing tasks before creating new ones
 - **Loop prevention** - Tasks created from GitHub won't create duplicate issues
-- **Idempotency** - Uses KV store to prevent duplicate webhook processing
 - **Retry logic** - Exponential backoff for transient API failures
 - **Backfill endpoint** - Sync existing GitHub issues to Todoist
+
+## How It Works
+
+The sync uses Todoist's project hierarchy to determine which GitHub repos to sync:
+
+```
+Issues (parent project)           → maps to "my-org" GitHub org
+├── api                          → syncs with my-org/api
+├── web-app                      → syncs with my-org/web-app
+└── docs                         → syncs with my-org/docs
+
+Client Projects (parent project)  → maps to "client-org" GitHub org
+├── project-a                    → syncs with client-org/project-a
+└── project-b                    → syncs with client-org/project-b
+```
+
+Every 15 minutes, the worker:
+1. Fetches your Todoist project hierarchy
+2. Polls GitHub for issues updated since last sync
+3. Creates/updates/completes Todoist tasks as needed
+4. Polls Todoist for changed tasks
+5. Creates/closes/reopens GitHub issues as needed
 
 ## Prerequisites
 
@@ -59,41 +79,36 @@ binding = "WEBHOOK_CACHE"
 id = "your-kv-namespace-id"
 ```
 
-### 3. Configure secrets
+### 3. Set up Todoist project structure
+
+Create your project hierarchy in Todoist:
+
+1. Create a parent project (e.g., "Issues" or "Work")
+2. Create sub-projects for each repo you want to sync (e.g., "api", "web-app")
+3. Note the parent project ID from the URL: `https://todoist.com/app/project/PROJECT_ID`
+
+### 4. Configure secrets
 
 ```bash
-npx wrangler secret put GITHUB_WEBHOOK_SECRET    # Random string for webhook verification
-npx wrangler secret put GITHUB_TOKEN             # GitHub PAT with repo scope
-npx wrangler secret put TODOIST_API_TOKEN        # From Todoist Settings > Integrations
-npx wrangler secret put TODOIST_WEBHOOK_SECRET   # Random string for webhook verification
-npx wrangler secret put TODOIST_PROJECT_ID       # Target project ID
-npx wrangler secret put GITHUB_ORG               # Default org/user for Todoist→GitHub sync
-npx wrangler secret put BACKFILL_SECRET          # Random string for api authentication
+npx wrangler secret put GITHUB_TOKEN        # GitHub PAT with repo scope
+npx wrangler secret put TODOIST_API_TOKEN   # From Todoist Settings > Integrations > Developer
+npx wrangler secret put ORG_MAPPINGS        # JSON mapping project IDs to GitHub orgs
+npx wrangler secret put BACKFILL_SECRET     # Random string for backfill endpoint auth
 ```
 
-### 4. Deploy
+For `ORG_MAPPINGS`, enter a JSON object mapping Todoist parent project IDs to GitHub organizations:
+
+```json
+{"2365501087": "my-org", "2365501088": "client-org"}
+```
+
+### 5. Deploy
 
 ```bash
 npm run deploy
 ```
 
-### 5. Configure webhooks
-
-**GitHub webhook:**
-
-1. Go to your repo or org settings → Webhooks → Add webhook
-2. Payload URL: `https://your-worker.workers.dev/github-webhook`
-3. Content type: `application/json`
-4. Secret: Same value as `GITHUB_WEBHOOK_SECRET`
-5. Events: Select "Issues"
-
-**Todoist webhook:**
-
-1. Go to [Todoist App Management](https://developer.todoist.com/appconsole.html)
-2. Create a new app or use an existing one
-3. Set webhook URL: `https://your-worker.workers.dev/todoist-webhook`
-4. Note the client secret and use it for `TODOIST_WEBHOOK_SECRET`
-5. Subscribe to: `item:added`, `item:completed`, `item:updated`, `item:uncompleted`
+That's it! The worker will automatically sync every 15 minutes via Cloudflare Cron Triggers.
 
 ## Configuration
 
@@ -101,49 +116,44 @@ npm run deploy
 
 | Secret | Description |
 |--------|-------------|
-| `GITHUB_WEBHOOK_SECRET` | Secret for GitHub webhook signature verification |
 | `GITHUB_TOKEN` | GitHub Personal Access Token with `repo` scope |
 | `TODOIST_API_TOKEN` | Todoist API token from Settings → Integrations → Developer |
-| `TODOIST_WEBHOOK_SECRET` | Todoist app client secret for webhook verification |
-| `TODOIST_PROJECT_ID` | ID of the Todoist project to sync with |
+| `ORG_MAPPINGS` | JSON mapping Todoist parent project IDs to GitHub orgs |
 
 ### Optional secrets
 
 | Secret | Description |
 |--------|-------------|
-| `GITHUB_ORG` | Default GitHub owner for Todoist→GitHub sync |
-| `BACKFILL_SECRET` | Auth token for backfill endpoint (falls back to `GITHUB_WEBHOOK_SECRET`) |
+| `BACKFILL_SECRET` | Auth token for backfill endpoint |
 
-### Finding your Todoist project ID
+### Finding Todoist project IDs
 
 1. Open Todoist in a web browser
-2. Navigate to the project you want to sync
+2. Navigate to the parent project you want to map
 3. Copy the project ID from the URL: `https://todoist.com/app/project/PROJECT_ID`
 
 ## API Endpoints
 
-### `POST /github-webhook`
+### `GET /sync-status`
 
-Receives GitHub issue events. Automatically called by GitHub when issues are created, closed, edited, or reopened.
+Check the sync status and health.
 
-**Headers:**
-- `X-GitHub-Event`: Event type
-- `X-Hub-Signature-256`: HMAC-SHA256 signature
-- `X-GitHub-Delivery`: Unique delivery ID
+**Response:**
 
-### `POST /todoist-webhook`
-
-Receives Todoist task events. Automatically called by Todoist when tasks are added, completed, updated, or uncompleted.
-
-**Headers:**
-- `X-Todoist-Hmac-SHA256`: Base64-encoded HMAC-SHA256 signature
-- `X-Todoist-Delivery-ID`: Unique delivery ID
+```json
+{
+  "status": "ok",
+  "lastSync": "2024-01-15T10:30:00.000Z",
+  "pollCount": 42,
+  "nextSync": "in 15 minutes"
+}
+```
 
 ### `POST /backfill`
 
-Sync existing GitHub issues to Todoist. Useful for initial setup or catching up after downtime.
+Sync existing GitHub issues to Todoist. Useful for initial setup.
 
-**Authentication:** Bearer token (use `BACKFILL_SECRET` or `GITHUB_WEBHOOK_SECRET`)
+**Authentication:** Bearer token (use `BACKFILL_SECRET`)
 
 **Request body:**
 
@@ -162,7 +172,7 @@ Sync existing GitHub issues to Todoist. Useful for initial setup or catching up 
 |-----------|----------|-------------|
 | `mode` | Yes | `"single-repo"` or `"org"` |
 | `repo` | For single-repo | Repository name |
-| `owner` | No | GitHub owner (defaults to `GITHUB_ORG`) |
+| `owner` | No | GitHub owner (defaults to first org in `ORG_MAPPINGS`) |
 | `state` | No | `"open"`, `"closed"`, or `"all"` (default: `"open"`) |
 | `dryRun` | No | Preview without creating tasks (default: `false`) |
 | `limit` | No | Max issues to process |
@@ -174,7 +184,7 @@ Sync existing GitHub issues to Todoist. Useful for initial setup or catching up 
 curl -X POST https://your-worker.workers.dev/backfill \
   -H "Authorization: Bearer $BACKFILL_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"mode": "single-repo", "repo": "my-repo", "dryRun": true}'
+  -d '{"mode": "single-repo", "repo": "my-repo", "owner": "my-org", "dryRun": true}'
 
 # Backfill all open issues from an org
 curl -X POST https://your-worker.workers.dev/backfill \
@@ -206,110 +216,13 @@ Health check endpoint.
 }
 ```
 
-## How It Works
+### `GET /api-docs`
 
-### GitHub → Todoist
+Interactive Swagger UI documentation.
 
-When a GitHub issue is created:
-1. GitHub sends a webhook to `/github-webhook`
-2. Worker verifies the signature and checks for duplicates
-3. Creates a Todoist task with format: `[repo#123] Issue title`
-4. Stores the GitHub issue URL in the task description
+### `GET /openapi.json`
 
-When an issue is closed/edited/reopened, the worker finds the corresponding task by matching the issue URL in task descriptions.
-
-### Todoist → GitHub
-
-When a Todoist task is created with a repo label:
-1. Todoist sends a webhook to `/todoist-webhook`
-2. Worker parses the label to determine the target repository
-3. Creates a GitHub issue in that repository
-4. Updates the task description with the new issue URL
-
-Label formats:
-- Simple: `my-repo` → uses `GITHUB_ORG/my-repo`
-- Explicit: `owner/repo` → uses `owner/repo`
-
-When a task is completed/updated/uncompleted, the worker parses the GitHub URL from the task description and updates the corresponding issue.
-
-## Development
-
-### Local development
-
-```bash
-npm run dev
-```
-
-This starts a local development server with hot reloading.
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start local development server |
-| `npm run deploy` | Deploy to Cloudflare Workers |
-| `npm run tail` | Stream live logs from deployed worker |
-| `npm test` | Run tests with Vitest |
-| `npm run test:coverage` | Run tests with coverage report |
-
-### Project structure
-
-```
-github-todoist-sync/
-├── src/
-│   └── worker.js         # Main worker code (single file)
-├── test/
-│   ├── signature.test.js # Signature verification tests
-│   ├── parsing.test.js   # URL and label parsing tests
-│   ├── webhook.test.js   # Webhook handler tests
-│   └── backfill.test.js  # Backfill endpoint tests
-├── .github/
-│   └── workflows/
-│       └── ci.yml        # CI/CD pipeline
-├── wrangler.toml         # Cloudflare Workers config
-├── vitest.config.ts      # Test configuration
-└── package.json
-```
-
-## Testing
-
-Tests are run using Vitest with the Cloudflare Workers test pool.
-
-```bash
-npm test
-```
-
-The test suite covers:
-- GitHub signature verification
-- Todoist signature verification
-- URL and label parsing
-- Webhook event handling
-- Backfill endpoint validation
-
-## CI/CD
-
-Deployments are automated via GitHub Actions:
-
-1. **Test job** - Runs on all pushes and pull requests
-2. **Deploy job** - Runs on pushes to `main` after tests pass
-
-### Setting up GitHub Actions
-
-1. Create a `production` environment in your repo settings
-2. Add the following secrets to the environment:
-
-| Secret | Description |
-|--------|-------------|
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers permissions |
-| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID |
-| `KV_NAMESPACE_ID` | KV namespace ID from step 2 |
-| `WORKER_GITHUB_WEBHOOK_SECRET` | GitHub webhook secret |
-| `WORKER_GITHUB_TOKEN` | GitHub PAT for API access |
-| `TODOIST_API_TOKEN` | Todoist API token |
-| `TODOIST_WEBHOOK_SECRET` | Todoist webhook secret |
-| `TODOIST_PROJECT_ID` | Target Todoist project ID |
-| `WORKER_GITHUB_ORG` | Default GitHub org (optional) |
-| `BACKFILL_SECRET` | Backfill auth token (optional) |
+OpenAPI 3.0 specification.
 
 ## Task Format
 
@@ -330,24 +243,97 @@ This format enables:
 - Direct linking to the GitHub issue
 - Bidirectional sync through URL matching
 
+## Development
+
+### Local development
+
+```bash
+npm run dev
+```
+
+This starts a local development server with hot reloading.
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start local development server |
+| `npm run deploy` | Deploy to Cloudflare Workers |
+| `npm run tail` | Stream live logs from deployed worker |
+| `npm test` | Run tests with Vitest |
+
+### Project structure
+
+```
+github-todoist-sync/
+├── src/
+│   └── worker.js         # Main worker code
+├── test/
+│   ├── parsing.test.js   # URL and label parsing tests
+│   ├── backfill.test.js  # Backfill endpoint tests
+│   └── polling.test.js   # Polling sync tests
+├── .github/
+│   └── workflows/
+│       └── ci.yml        # CI/CD pipeline
+├── wrangler.toml         # Cloudflare Workers config
+├── vitest.config.ts      # Test configuration
+└── package.json
+```
+
+## Testing
+
+Tests are run using Vitest with the Cloudflare Workers test pool.
+
+```bash
+npm test
+```
+
+The test suite covers:
+- URL and label parsing
+- Backfill endpoint validation
+- Polling sync and project hierarchy
+- Task creation and completion flows
+
+## CI/CD
+
+Deployments are automated via GitHub Actions:
+
+1. **Test job** - Runs on all pushes and pull requests
+2. **Deploy job** - Runs on pushes to `main` after tests pass
+
+### Setting up GitHub Actions
+
+1. Create a `production` environment in your repo settings
+2. Add the following secrets to the environment:
+
+| Secret | Description |
+|--------|-------------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers permissions |
+| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID |
+| `KV_NAMESPACE_ID` | KV namespace ID from step 2 |
+| `WORKER_GITHUB_TOKEN` | GitHub PAT for API access |
+| `TODOIST_API_TOKEN` | Todoist API token |
+| `ORG_MAPPINGS` | JSON mapping project IDs to GitHub orgs |
+| `BACKFILL_SECRET` | Backfill auth token |
+
 ## Troubleshooting
 
-### Webhook not triggering
+### Sync not running
 
-1. Check the webhook delivery logs in GitHub/Todoist
-2. Verify secrets match between services
+1. Check sync status: `curl https://your-worker.workers.dev/sync-status`
+2. Verify cron trigger is configured in `wrangler.toml`
 3. Check worker logs: `npm run tail`
 
 ### Tasks not being created
 
-1. Verify `TODOIST_PROJECT_ID` is correct
-2. Check if task already exists (duplicate prevention)
-3. Ensure GitHub issue events are selected in webhook config
+1. Verify `ORG_MAPPINGS` is correctly configured
+2. Check if the repo has a corresponding sub-project in Todoist
+3. Ensure the parent project ID in `ORG_MAPPINGS` is correct
 
 ### Issues not being created from Todoist
 
-1. Add a repo label to the task (e.g., `my-repo` or `org/repo`)
-2. Ensure `GITHUB_ORG` is set if using simple repo labels
+1. Ensure the task is in a sub-project (not the parent project)
+2. Verify the sub-project name matches a valid GitHub repo
 3. Verify `GITHUB_TOKEN` has `repo` scope
 
 ### Rate limiting
@@ -360,10 +346,9 @@ For large backfills, tasks are processed with automatic delays to stay within li
 
 ## Security
 
-- All webhook payloads are verified using HMAC-SHA256 signatures
-- Signature comparison uses timing-safe equality checks
+- Backfill endpoint requires Bearer token authentication
 - Secrets are stored securely in Cloudflare Workers
-- KV store prevents replay attacks through idempotency
+- GitHub token uses least-privilege `repo` scope
 
 ## License
 
