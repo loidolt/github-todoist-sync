@@ -149,7 +149,7 @@ Deployments are handled via GitHub Actions (`.github/workflows/ci.yml`):
 | `TODOIST_API_TOKEN` | Todoist API token |
 | `TODOIST_WEBHOOK_SECRET` | Secret for Todoist webhook verification |
 | `TODOIST_PROJECT_ID` | Todoist project ID for tasks |
-| `GITHUB_ORG` | Default GitHub org for Todoist→GitHub sync (optional) |
+| `WORKER_GITHUB_ORG` | Default GitHub org for Todoist→GitHub sync (optional) |
 | `BACKFILL_SECRET` | Secret for backfill endpoint auth (optional, falls back to `WORKER_GITHUB_WEBHOOK_SECRET`) |
 
 3. Create the KV namespace (if not already created):

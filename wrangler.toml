@@ -7,7 +7,7 @@ compatibility_date = "2024-01-01"
 # Then replace the id below with the output
 [[kv_namespaces]]
 binding = "WEBHOOK_CACHE"
-id = "YOUR_KV_NAMESPACE_ID"
+id = "2017dc345303435c8f3a36250a22de8a"
 
 # Secrets are added via `wrangler secret put <NAME>`
 # Required secrets:

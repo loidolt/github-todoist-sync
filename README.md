@@ -68,6 +68,7 @@ npx wrangler secret put TODOIST_API_TOKEN        # From Todoist Settings > Integ
 npx wrangler secret put TODOIST_WEBHOOK_SECRET   # Random string for webhook verification
 npx wrangler secret put TODOIST_PROJECT_ID       # Target project ID
 npx wrangler secret put GITHUB_ORG               # Default org/user for Todoist→GitHub sync
+npx wrangler secret put BACKFILL_SECRET          # Random string for api authentication
 ```
 
 ### 4. Deploy
@@ -307,7 +308,7 @@ Deployments are automated via GitHub Actions:
 | `TODOIST_API_TOKEN` | Todoist API token |
 | `TODOIST_WEBHOOK_SECRET` | Todoist webhook secret |
 | `TODOIST_PROJECT_ID` | Target Todoist project ID |
-| `GITHUB_ORG` | Default GitHub org (optional) |
+| `WORKER_GITHUB_ORG` | Default GitHub org (optional) |
 | `BACKFILL_SECRET` | Backfill auth token (optional) |
 
 ## Task Format
