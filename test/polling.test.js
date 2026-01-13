@@ -477,3 +477,151 @@ describe('Task Completion Sync', () => {
     expect(state.pollCount).toBe(1);
   });
 });
+
+describe('Auto-Backfill for New Projects', () => {
+  beforeEach(() => {
+    setupOrgMappings();
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+  });
+
+  it('tracks known project IDs in sync state', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock GitHub issues
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues/ })
+      .reply(200, []);
+
+    // Mock Todoist batch task fetch (for auto-backfill check)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.knownProjectIds).toBeDefined();
+    expect(state.knownProjectIds).toContain(TEST_SUB_PROJECT_ID);
+  });
+
+  it('auto-backfills new projects when detected', async () => {
+    // Set up initial state with one known project
+    await env.WEBHOOK_CACHE.put(
+      'sync:state',
+      JSON.stringify({
+        lastGitHubSync: '2024-01-15T10:30:00Z',
+        todoistSyncToken: 'existing-token',
+        lastPollTime: '2024-01-15T10:30:00Z',
+        pollCount: 5,
+        knownProjectIds: [TEST_SUB_PROJECT_ID], // Only knows about first project
+      })
+    );
+
+    // Mock Todoist projects with a NEW sub-project
+    const projectsWithNew = [
+      ...DEFAULT_PROJECTS,
+      { id: '1002', name: 'new-repo', parent_id: TEST_PARENT_PROJECT_ID },
+    ];
+
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: projectsWithNew, sync_token: 'projects-token' });
+
+    // Mock Todoist batch task fetch for auto-backfill (no existing tasks)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'batch-token' });
+
+    // Mock GitHub issues for the NEW repo (for auto-backfill)
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/new-repo\/issues/ })
+      .reply(200, [
+        {
+          number: 1,
+          title: 'Issue in new repo',
+          html_url: 'https://github.com/test-org/new-repo/issues/1',
+          state: 'open',
+          labels: [],
+        },
+      ]);
+
+    // Mock Todoist task creation for auto-backfill
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .reply(201, { id: 'auto-backfill-task', content: 'Test' });
+
+    // Mock GitHub issues for the existing repo (normal sync)
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues/ })
+      .reply(200, []);
+
+    // Mock Todoist items sync (normal sync)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Verify new project is now in known projects
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.knownProjectIds).toContain('1002');
+    expect(state.knownProjectIds).toHaveLength(2);
+  });
+
+  it('does not re-backfill already known projects', async () => {
+    // Set up initial state with all projects already known
+    await env.WEBHOOK_CACHE.put(
+      'sync:state',
+      JSON.stringify({
+        lastGitHubSync: '2024-01-15T10:30:00Z',
+        todoistSyncToken: 'existing-token',
+        lastPollTime: '2024-01-15T10:30:00Z',
+        pollCount: 5,
+        knownProjectIds: [TEST_SUB_PROJECT_ID], // Already knows the project
+      })
+    );
+
+    // Mock Todoist projects (same as known)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock GitHub issues for normal sync
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues/ })
+      .reply(200, []);
+
+    // Mock Todoist items sync
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Sync should complete normally without auto-backfill
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.pollCount).toBe(6);
+  });
+});

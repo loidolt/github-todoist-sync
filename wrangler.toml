@@ -15,7 +15,7 @@ crons = ["*/15 * * * *"]
 
 [observability]
 [observability.logs]
-enabled = false
+enabled = true
 invocation_logs = true
 
 # Secrets are added via `wrangler secret put <NAME>`

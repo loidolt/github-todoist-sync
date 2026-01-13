@@ -557,7 +557,7 @@ describe('Backfill Projects Mode', () => {
   });
 
   it('uses Todoist project hierarchy to determine repos', async () => {
-    // Mock Todoist projects
+    // Mock Todoist projects (first sync call)
     fetchMock
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
@@ -569,6 +569,12 @@ describe('Backfill Projects Mode', () => {
         ],
         sync_token: 'test-token',
       });
+
+    // Mock Todoist batch task fetch (second sync call for existing tasks)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'batch-token' });
 
     // Mock GitHub issues for repo-a
     fetchMock
@@ -587,12 +593,6 @@ describe('Backfill Projects Mode', () => {
     fetchMock
       .get('https://api.github.com')
       .intercept({ path: /\/repos\/test-org\/repo-b\/issues/ })
-      .reply(200, []);
-
-    // Mock Todoist task check
-    fetchMock
-      .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
       .reply(200, []);
 
     const request = createBackfillRequest({
@@ -623,7 +623,7 @@ describe('Backfill Projects Mode', () => {
   });
 
   it('creates tasks in correct sub-projects', async () => {
-    // Mock Todoist projects
+    // Mock Todoist projects (first sync call)
     fetchMock
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
@@ -634,6 +634,12 @@ describe('Backfill Projects Mode', () => {
         ],
         sync_token: 'test-token',
       });
+
+    // Mock Todoist batch task fetch (second sync call - no existing tasks)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'batch-token' });
 
     // Mock GitHub issues - use unique repo name
     fetchMock
@@ -647,12 +653,6 @@ describe('Backfill Projects Mode', () => {
           labels: [],
         },
       ]);
-
-    // Mock Todoist task check - no existing task
-    fetchMock
-      .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
-      .reply(200, []);
 
     // Mock Todoist task creation - use unique task id
     fetchMock
@@ -677,6 +677,87 @@ describe('Backfill Projects Mode', () => {
     expect(issueEvent.projectId).toBe('1001');
 
     const complete = events.find((e) => e.type === 'complete');
+    expect(complete.summary.created).toBe(1);
+  });
+
+  it('uses batch task fetching to skip existing tasks efficiently', async () => {
+    // Mock Todoist projects (first sync call)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, {
+        projects: [
+          { id: '1000', name: 'Test Org Issues', parent_id: null },
+          { id: '1001', name: 'batch-test-repo', parent_id: '1000' },
+        ],
+        sync_token: 'projects-token',
+      });
+
+    // Mock Todoist batch task fetch (second sync call for items)
+    // This returns existing tasks with GitHub URLs
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, {
+        items: [
+          {
+            id: 'existing-batch-task-1',
+            project_id: '1001',
+            content: '[batch-test-repo#1] Existing Issue',
+            description: 'https://github.com/test-org/batch-test-repo/issues/1',
+          },
+        ],
+        sync_token: 'items-token',
+      });
+
+    // Mock GitHub issues - includes both existing and new
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/batch-test-repo\/issues/ })
+      .reply(200, [
+        {
+          number: 1,
+          title: 'Existing Issue',
+          html_url: 'https://github.com/test-org/batch-test-repo/issues/1',
+          labels: [],
+        },
+        {
+          number: 2,
+          title: 'New Issue',
+          html_url: 'https://github.com/test-org/batch-test-repo/issues/2',
+          labels: [],
+        },
+      ]);
+
+    const request = createBackfillRequest({
+      mode: 'projects',
+      dryRun: true,
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const events = await readNDJSONStream(response);
+
+    // Config event should show existingTaskCount
+    const configEvent = events.find((e) => e.type === 'config');
+    expect(configEvent).toBeDefined();
+    expect(configEvent.existingTaskCount).toBe(1);
+
+    // Issue events should show skip for existing and would_create for new
+    const issueEvents = events.filter((e) => e.type === 'issue');
+    expect(issueEvents).toHaveLength(2);
+
+    const existingIssueEvent = issueEvents.find((e) => e.issue === 1);
+    expect(existingIssueEvent.status).toBe('skipped');
+    expect(existingIssueEvent.reason).toBe('already_exists');
+
+    const newIssueEvent = issueEvents.find((e) => e.issue === 2);
+    expect(newIssueEvent.status).toBe('would_create');
+
+    const complete = events.find((e) => e.type === 'complete');
+    expect(complete.summary.skipped).toBe(1);
     expect(complete.summary.created).toBe(1);
   });
 });

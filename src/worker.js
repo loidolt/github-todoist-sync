@@ -404,6 +404,7 @@ function getDefaultSyncState() {
     todoistSyncToken: '*', // '*' = full sync for Todoist
     lastPollTime: null,
     pollCount: 0,
+    knownProjectIds: [], // Track known sub-project IDs for auto-backfill detection
   };
 }
 
@@ -821,6 +822,9 @@ async function getGitHubIssue(env, { owner, repo, issueNumber }) {
  * Uses Todoist project hierarchy to determine which repos to sync:
  * - Parent projects map to GitHub organizations (via ORG_MAPPINGS)
  * - Sub-projects map to repositories (sub-project name = repo name)
+ *
+ * Auto-backfill: When new sub-projects are detected, automatically backfills
+ * their GitHub issues to Todoist tasks.
  */
 async function performBidirectionalSync(env) {
   console.log('Starting bidirectional sync...');
@@ -833,6 +837,7 @@ async function performBidirectionalSync(env) {
   const results = {
     github: { processed: 0, created: 0, updated: 0, completed: 0, reopened: 0, errors: 0 },
     todoist: { processed: 0, closed: 0, reopened: 0, created_issues: 0, errors: 0 },
+    autoBackfill: { newProjects: 0, issues: 0, created: 0, skipped: 0, errors: 0 },
   };
 
   try {
@@ -851,6 +856,23 @@ async function performBidirectionalSync(env) {
     if (projectHierarchy.subProjects.size === 0) {
       console.warn('No sub-projects found under mapped parent projects');
       return { success: true, duration: Date.now() - startTime, results, warning: 'No repos configured' };
+    }
+
+    // Detect new projects for auto-backfill
+    // Only auto-backfill if we have known projects (skip on first sync to avoid backfilling everything)
+    const currentProjectIds = Array.from(projectHierarchy.subProjects.keys());
+    const knownProjectIds = new Set(state.knownProjectIds || []);
+    const isFirstSync = state.knownProjectIds === undefined || state.knownProjectIds.length === 0;
+    const newProjectIds = currentProjectIds.filter((id) => !knownProjectIds.has(id));
+
+    if (newProjectIds.length > 0 && !isFirstSync) {
+      console.log(`Detected ${newProjectIds.length} new project(s) for auto-backfill:`, newProjectIds);
+      results.autoBackfill.newProjects = newProjectIds.length;
+
+      // Auto-backfill new projects
+      await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill);
+    } else if (isFirstSync) {
+      console.log(`First sync - recording ${currentProjectIds.length} project(s), skipping auto-backfill`);
     }
 
     // Poll GitHub for changes
@@ -892,12 +914,13 @@ async function performBidirectionalSync(env) {
       }
     }
 
-    // Save updated sync state
+    // Save updated sync state (including all known project IDs)
     const newState = {
       lastGitHubSync: new Date().toISOString(),
       todoistSyncToken: newSyncToken,
       lastPollTime: new Date().toISOString(),
       pollCount: state.pollCount + 1,
+      knownProjectIds: currentProjectIds, // Track all current projects
     };
     await saveSyncState(env, newState);
 
@@ -909,6 +932,79 @@ async function performBidirectionalSync(env) {
     console.error('Sync failed:', error);
     return { success: false, error: error.message, results };
   }
+}
+
+/**
+ * Auto-backfill newly detected projects
+ * Called during scheduled sync when new Todoist sub-projects are found
+ */
+async function performAutoBackfill(env, newProjectIds, projectHierarchy, results) {
+  const { subProjects } = projectHierarchy;
+
+  // Get repos to backfill
+  const reposToBackfill = newProjectIds
+    .filter((id) => subProjects.has(id))
+    .map((id) => {
+      const project = subProjects.get(id);
+      return {
+        owner: project.githubOrg,
+        name: project.repoName,
+        projectId: project.id,
+        fullRepo: project.fullRepo,
+      };
+    });
+
+  if (reposToBackfill.length === 0) {
+    console.log('No new repos to backfill');
+    return;
+  }
+
+  console.log(`Auto-backfilling ${reposToBackfill.length} new repo(s):`, reposToBackfill.map((r) => r.fullRepo));
+
+  // Pre-fetch existing tasks for the new projects (batch operation)
+  const existingTasks = await fetchExistingTasksForProjects(
+    env,
+    reposToBackfill.map((r) => r.projectId)
+  );
+
+  for (const repo of reposToBackfill) {
+    try {
+      console.log(`Auto-backfilling: ${repo.fullRepo}`);
+
+      // Fetch open issues for this repo
+      for await (const issue of fetchGitHubIssues(env, repo.owner, repo.name, { state: 'open' })) {
+        results.issues++;
+
+        try {
+          // Check if task already exists (using pre-fetched map)
+          if (existingTasks.has(issue.html_url)) {
+            results.skipped++;
+            continue;
+          }
+
+          // Create task for this issue
+          await createTodoistTask(env, {
+            title: issue.title,
+            issueNumber: issue.number,
+            repoName: repo.name,
+            issueUrl: issue.html_url,
+            projectId: repo.projectId,
+          });
+
+          results.created++;
+          console.log(`Auto-backfill created task for: ${repo.fullRepo}#${issue.number}`);
+        } catch (error) {
+          console.error(`Auto-backfill error for ${repo.fullRepo}#${issue.number}:`, error);
+          results.errors++;
+        }
+      }
+    } catch (error) {
+      console.error(`Auto-backfill failed for repo ${repo.fullRepo}:`, error);
+      results.errors++;
+    }
+  }
+
+  console.log('Auto-backfill completed:', JSON.stringify(results));
 }
 
 /**
@@ -1312,6 +1408,58 @@ async function updateTodoistTaskDescription(env, taskId, description) {
 // =============================================================================
 
 /**
+ * Fetch all tasks for specified projects using Todoist Sync API
+ * Returns a Map of issueUrl -> taskId for quick existence checking
+ * This is much more efficient than checking each issue individually
+ */
+async function fetchExistingTasksForProjects(env, projectIds) {
+  const existingTasks = new Map(); // issueUrl -> { taskId, projectId }
+
+  // Use Sync API to get all tasks at once (much more efficient than REST API per-task)
+  const response = await fetch('https://api.todoist.com/sync/v9/sync', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      sync_token: '*', // Full sync to get all tasks
+      resource_types: '["items"]',
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Todoist Sync API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  const projectIdSet = new Set(projectIds.map(String));
+
+  // Filter to tasks in our target projects and extract GitHub URLs
+  for (const task of data.items || []) {
+    const taskProjectId = String(task.project_id);
+    if (!projectIdSet.has(taskProjectId)) continue;
+
+    // Check if task has a GitHub issue URL in description
+    if (task.description) {
+      const githubUrlMatch = task.description.match(
+        /https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+/
+      );
+      if (githubUrlMatch) {
+        existingTasks.set(githubUrlMatch[0], {
+          taskId: task.id,
+          projectId: taskProjectId,
+        });
+      }
+    }
+  }
+
+  console.log(`Found ${existingTasks.size} existing tasks with GitHub URLs across ${projectIds.length} projects`);
+  return existingTasks;
+}
+
+/**
  * Simple token bucket rate limiter
  */
 class RateLimiter {
@@ -1553,10 +1701,17 @@ async function* fetchUserRepos(env, user) {
  * @param {string} repoFullName - Full repo name (owner/repo)
  * @param {boolean} dryRun - If true, don't actually create tasks
  * @param {string} [projectId] - Optional Todoist project ID for the task
+ * @param {Map} [existingTasks] - Pre-fetched map of issueUrl -> taskInfo for batch checking
  */
-async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId = null) {
+async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId = null, existingTasks = null) {
   try {
-    const exists = await taskExistsForIssue(env, issue.html_url);
+    // Check existence using pre-fetched map (no API call) or fallback to individual check
+    let exists;
+    if (existingTasks) {
+      exists = existingTasks.has(issue.html_url);
+    } else {
+      exists = await taskExistsForIssue(env, issue.html_url);
+    }
 
     if (exists) {
       return { status: 'skipped', reason: 'already_exists' };
@@ -1630,6 +1785,8 @@ async function handleBackfill(request, env, _ctx) {
     try {
       // Get list of repos to process (with optional projectId for task creation)
       let repos;
+      let existingTasks = null; // Pre-fetched tasks for batch existence checking
+
       if (mode === 'single-repo') {
         repos = [{ owner, name: repo, projectId: null }];
       } else if (mode === 'projects') {
@@ -1644,11 +1801,16 @@ async function handleBackfill(request, env, _ctx) {
           projectId: p.id,
         }));
 
+        // Pre-fetch all existing tasks for batch existence checking (1 API call instead of N)
+        const projectIds = repos.map((r) => r.projectId);
+        existingTasks = await fetchExistingTasksForProjects(env, projectIds);
+
         await writeJSON({
           type: 'config',
           mode: 'projects',
           orgs: Array.from(orgMappings.values()),
           repos: repos.map((r) => `${r.owner}/${r.name}`),
+          existingTaskCount: existingTasks.size,
         });
       } else {
         // mode === 'org': Collect repos from async generator
@@ -1673,7 +1835,8 @@ async function handleBackfill(request, env, _ctx) {
           })) {
             repoIssueCount++;
 
-            if (!dryRun) {
+            if (!dryRun && !existingTasks) {
+              // Only rate limit Todoist calls if we're making individual existence checks
               await todoistLimiter.waitForToken();
             }
 
@@ -1682,7 +1845,8 @@ async function handleBackfill(request, env, _ctx) {
               issue,
               repoFullName,
               dryRun,
-              repoInfo.projectId
+              repoInfo.projectId,
+              existingTasks // Pass pre-fetched tasks for batch checking
             );
 
             summary.total++;

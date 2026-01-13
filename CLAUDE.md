@@ -104,7 +104,8 @@ Uses Cloudflare Cron Triggers to poll both platforms every 15 minutes. This appr
   "lastGitHubSync": "2024-01-15T10:30:00Z",
   "todoistSyncToken": "VRyFHa...",
   "lastPollTime": "2024-01-15T10:30:00Z",
-  "pollCount": 42
+  "pollCount": 42,
+  "knownProjectIds": ["1001", "1002"]
 }
 ```
 
@@ -130,10 +131,11 @@ curl https://your-worker.workers.dev/sync-status
   - Parent projects map to GitHub organizations
   - Sub-projects map to repository names
   - Supports multiple organizations via `ORG_MAPPINGS`
-- **Duplicate prevention**: Checks existing tasks before creating new ones
+- **Auto-backfill for new projects**: When you add a new sub-project in Todoist, the next sync automatically backfills all open GitHub issues from that repo. Simply add a sub-project named after your repo and issues will be synced on the next cycle.
+- **Duplicate prevention**: Checks existing tasks before creating new ones (uses batch API calls for efficiency)
 - **Loop prevention**: Tasks with GitHub URLs in description won't create new issues
 - **Retry logic**: Exponential backoff for transient API failures
-- **Efficient queries**: Uses Todoist Sync API with incremental sync tokens
+- **Efficient queries**: Uses Todoist Sync API with incremental sync tokens and batch task fetching
 
 ### Backfill Endpoint
 
