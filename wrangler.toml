@@ -20,11 +20,9 @@ invocation_logs = true
 
 # Secrets are added via `wrangler secret put <NAME>`
 # Required secrets:
-# - GITHUB_WEBHOOK_SECRET
-# - GITHUB_TOKEN
-# - TODOIST_API_TOKEN
-# - TODOIST_WEBHOOK_SECRET
-# - TODOIST_PROJECT_ID
+# - GITHUB_TOKEN         (GitHub Personal Access Token with repo scope)
+# - TODOIST_API_TOKEN    (Todoist API token from Settings > Integrations)
+# - ORG_MAPPINGS         (JSON: {"todoist-project-id": "github-org"})
 #
-# Optional (for Todoist -> GitHub sync):
-# - GITHUB_ORG  (e.g., "your-username" or "your-org")
+# Optional:
+# - BACKFILL_SECRET      (Bearer token for /backfill endpoint)

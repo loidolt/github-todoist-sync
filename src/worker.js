@@ -13,6 +13,34 @@
  */
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+const CONSTANTS = {
+  // Pagination
+  PER_PAGE: 100,
+
+  // Rate limits (requests per minute)
+  GITHUB_RATE_LIMIT: 60,
+  TODOIST_RATE_LIMIT: 300,
+
+  // Retry configuration
+  MAX_RETRIES: 3,
+  BASE_RETRY_DELAY_MS: 1000,
+  MAX_RETRY_DELAY_MS: 10000,
+
+  // Sync health thresholds
+  DEGRADED_THRESHOLD_MINUTES: 30,
+
+  // Polling interval
+  POLLING_INTERVAL_MINUTES: 15,
+
+  // API endpoints
+  TODOIST_API_BASE: 'https://api.todoist.com',
+  GITHUB_API_BASE: 'https://api.github.com',
+};
+
+// =============================================================================
 // OpenAPI Specification
 // =============================================================================
 
@@ -95,8 +123,8 @@ function getOpenApiSpec(baseUrl) {
                   properties: {
                     mode: {
                       type: 'string',
-                      enum: ['single-repo', 'org'],
-                      description: 'Backfill mode',
+                      enum: ['single-repo', 'org', 'projects'],
+                      description: 'Backfill mode: single-repo, org, or projects (recommended)',
                     },
                     repo: {
                       type: 'string',
@@ -105,7 +133,7 @@ function getOpenApiSpec(baseUrl) {
                     },
                     owner: {
                       type: 'string',
-                      description: 'GitHub owner/org (defaults to GITHUB_ORG env var)',
+                      description: 'GitHub owner/org (required for single-repo and org modes)',
                       example: 'my-org',
                     },
                     state: {
@@ -146,7 +174,15 @@ function getOpenApiSpec(baseUrl) {
                     summary: 'Backfill entire org',
                     value: {
                       mode: 'org',
+                      owner: 'my-org',
                       state: 'open',
+                    },
+                  },
+                  'projects': {
+                    summary: 'Backfill using Todoist project hierarchy (recommended)',
+                    value: {
+                      mode: 'projects',
+                      dryRun: true,
                     },
                   },
                 },
@@ -190,7 +226,7 @@ function getOpenApiSpec(baseUrl) {
         bearerAuth: {
           type: 'http',
           scheme: 'bearer',
-          description: 'Bearer token (BACKFILL_SECRET or GITHUB_WEBHOOK_SECRET)',
+          description: 'Bearer token (BACKFILL_SECRET)',
         },
       },
     },
@@ -249,10 +285,31 @@ function sleep(ms) {
 }
 
 /**
- * Retry wrapper with exponential backoff
+ * Add random jitter to prevent thundering herd
+ * Returns a random value between 0 and maxMs
+ */
+function jitter(maxMs) {
+  return Math.floor(Math.random() * maxMs);
+}
+
+/**
+ * Check if a Todoist task is completed
+ * Handles both REST API (is_completed) and Sync API (checked) formats
+ */
+function isTaskCompleted(task) {
+  return task.is_completed === true || task.checked === 1;
+}
+
+/**
+ * Retry wrapper with exponential backoff and jitter
+ * Handles 429 rate limit errors with Retry-After header support
  */
 async function withRetry(fn, options = {}) {
-  const { maxRetries = 3, baseDelay = 1000, maxDelay = 10000 } = options;
+  const {
+    maxRetries = CONSTANTS.MAX_RETRIES,
+    baseDelay = CONSTANTS.BASE_RETRY_DELAY_MS,
+    maxDelay = CONSTANTS.MAX_RETRY_DELAY_MS,
+  } = options;
   let lastError;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -261,20 +318,36 @@ async function withRetry(fn, options = {}) {
     } catch (error) {
       lastError = error;
 
-      // Don't retry on client errors (4xx) - check for HTTP status in error message
+      // Check for HTTP status in error message
       // Error messages are formatted as "API error: {status} - {message}"
       const statusMatch = error.message?.match(/API error: (\d{3})/);
       if (statusMatch) {
         const status = parseInt(statusMatch[1], 10);
+
+        // Handle rate limiting (429) - always retry with backoff
+        if (status === 429) {
+          if (attempt < maxRetries) {
+            // Use Retry-After header if available, otherwise exponential backoff
+            const retryAfterMs = error.retryAfter || baseDelay * Math.pow(2, attempt);
+            const waitTime = Math.min(retryAfterMs, maxDelay) + jitter(100);
+            console.log(`Rate limited (429), waiting ${waitTime}ms before retry ${attempt + 1}/${maxRetries}`);
+            await sleep(waitTime);
+            continue;
+          }
+        }
+
+        // Don't retry on other 4xx client errors
         if (status >= 400 && status < 500) {
           throw error;
         }
       }
 
       if (attempt < maxRetries) {
+        // Exponential backoff with jitter
         const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
-        console.log(`Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms`);
-        await sleep(delay);
+        const jitteredDelay = delay + jitter(delay * 0.1); // Add 10% jitter
+        console.log(`Retry attempt ${attempt + 1}/${maxRetries} after ${jitteredDelay}ms`);
+        await sleep(jitteredDelay);
       }
     }
   }
@@ -345,11 +418,6 @@ function getDefaultSyncState() {
  */
 function parseOrgMappings(env) {
   if (!env.ORG_MAPPINGS) {
-    // Fallback to legacy single-project mode
-    if (env.TODOIST_PROJECT_ID && env.GITHUB_ORG) {
-      console.log('Using legacy single-project mode (TODOIST_PROJECT_ID + GITHUB_ORG)');
-      return new Map([[env.TODOIST_PROJECT_ID, env.GITHUB_ORG]]);
-    }
     console.warn('No ORG_MAPPINGS configured');
     return new Map();
   }
@@ -492,7 +560,7 @@ async function fetchGitHubIssuesSince(env, owner, repo, since) {
       state: 'all', // Get both open and closed issues
       sort: 'updated',
       direction: 'asc',
-      per_page: '100',
+      per_page: String(CONSTANTS.PER_PAGE),
       page: String(page),
     });
 
@@ -531,8 +599,8 @@ async function fetchGitHubIssuesSince(env, owner, repo, since) {
       });
     }
 
-    // No more pages if we got fewer than 100
-    if (pageIssues.length < 100) break;
+    // No more pages if we got fewer than requested
+    if (pageIssues.length < CONSTANTS.PER_PAGE) break;
     page++;
   }
 
@@ -592,27 +660,6 @@ async function pollTodoistChanges(env, syncToken, projectHierarchy) {
   };
 }
 
-/**
- * Get a single Todoist task by ID using REST API
- * Used to get current state of a task during reconciliation
- */
-async function getTodoistTask(env, taskId) {
-  const response = await fetch(
-    `https://api.todoist.com/rest/v2/tasks/${taskId}`,
-    {
-      headers: { Authorization: `Bearer ${env.TODOIST_API_TOKEN}` },
-    }
-  );
-
-  if (!response.ok) {
-    if (response.status === 404) return null;
-    const errorText = await response.text();
-    throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
-  }
-
-  return response.json();
-}
-
 // =============================================================================
 // Reconciliation Logic
 // =============================================================================
@@ -639,10 +686,8 @@ async function syncIssueToTodoist(env, issue) {
         title: issue.title,
         issueNumber: issue.number,
         repoName: repoName,
-        repoFullName: repoFullName,
         issueUrl: issueUrl,
         projectId: projectId, // Create in the sub-project for this repo
-        labels: issue.labels?.map((l) => l.name) || [],
       });
       return { action: 'created', issue: `${repoFullName}#${issue.number}` };
     }
@@ -650,7 +695,7 @@ async function syncIssueToTodoist(env, issue) {
   }
 
   // Task exists - sync state
-  const taskCompleted = task.is_completed;
+  const taskCompleted = isTaskCompleted(task);
 
   if (issue.state === 'closed' && !taskCompleted) {
     console.log(`Completing task for closed issue: ${repoFullName}#${issue.number}`);
@@ -692,7 +737,7 @@ async function syncTaskToGitHub(env, task) {
       return { action: 'skipped', reason: 'issue_not_found', taskId: task.id };
     }
 
-    const taskCompleted = task.is_completed || task.checked === 1;
+    const taskCompleted = isTaskCompleted(task);
 
     if (taskCompleted && issue.state === 'open') {
       console.log(`Closing issue for completed task: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
@@ -716,7 +761,7 @@ async function syncTaskToGitHub(env, task) {
   }
 
   // Skip completed tasks - don't create closed issues
-  if (task.is_completed || task.checked === 1) {
+  if (isTaskCompleted(task)) {
     return { action: 'skipped', reason: 'completed_no_issue', taskId: task.id };
   }
 
@@ -888,13 +933,13 @@ async function handleSyncStatus(env) {
       pollCount: state.pollCount,
       timeSinceLastPollMinutes: timeSinceLastPoll,
       pollingEnabled: true,
-      pollingIntervalMinutes: 15,
+      pollingIntervalMinutes: CONSTANTS.POLLING_INTERVAL_MINUTES,
     };
 
-    // Mark as unhealthy if last poll was more than 30 minutes ago
-    if (timeSinceLastPoll !== null && timeSinceLastPoll > 30) {
+    // Mark as unhealthy if last poll was more than threshold
+    if (timeSinceLastPoll !== null && timeSinceLastPoll > CONSTANTS.DEGRADED_THRESHOLD_MINUTES) {
       status.status = 'degraded';
-      status.warning = 'Last sync was more than 30 minutes ago';
+      status.warning = `Last sync was more than ${CONSTANTS.DEGRADED_THRESHOLD_MINUTES} minutes ago`;
     }
 
     return new Response(JSON.stringify(status, null, 2), {
@@ -966,7 +1011,7 @@ export default {
    * Scheduled handler for cron-triggered polling sync
    * Runs every 15 minutes to sync GitHub issues and Todoist tasks
    */
-  async scheduled(controller, env, ctx) {
+  async scheduled(_controller, env, _ctx) {
     console.log('Cron trigger fired at', new Date().toISOString());
 
     try {
@@ -996,18 +1041,17 @@ function jsonResponse(data, status = 200) {
 
 async function createTodoistTask(
   env,
-  { title, issueNumber, repoName, repoFullName, issueUrl, projectId, labels }
+  { title, issueNumber, repoName, issueUrl, projectId }
 ) {
+  if (!projectId) {
+    throw new Error('projectId is required - ensure ORG_MAPPINGS is configured');
+  }
+
   const taskData = {
     content: `[${repoName}#${issueNumber}] ${title}`,
     description: issueUrl,
-    // Use provided projectId (from sub-project) or fall back to legacy env var
-    project_id: projectId || env.TODOIST_PROJECT_ID,
+    project_id: projectId,
   };
-
-  // Optional: Map GitHub labels to Todoist priority
-  // Uncomment if you want priority mapping
-  // taskData.priority = getPriority(labels);
 
   return withRetry(async () => {
     const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
@@ -1044,32 +1088,22 @@ async function taskExistsForIssue(env, issueUrl) {
 
 /**
  * Find a Todoist task by its GitHub issue URL in the description
- * Uses filter parameter to search efficiently (avoids pagination issues)
+ * Searches all tasks using Todoist's search filter
  */
 async function findTodoistTaskByIssueUrl(env, issueUrl) {
   return withRetry(async () => {
-    // Use filter to narrow down search - search for the issue URL
+    // Use global search filter to find the task by URL
     const filterQuery = encodeURIComponent(`search: ${issueUrl}`);
     const response = await fetch(
-      `https://api.todoist.com/rest/v2/tasks?project_id=${env.TODOIST_PROJECT_ID}&filter=${filterQuery}`,
+      `https://api.todoist.com/rest/v2/tasks?filter=${filterQuery}`,
       {
         headers: { Authorization: `Bearer ${env.TODOIST_API_TOKEN}` },
       }
     );
 
     if (!response.ok) {
-      // Fall back to fetching all tasks if filter fails
-      const allResponse = await fetch(
-        `https://api.todoist.com/rest/v2/tasks?project_id=${env.TODOIST_PROJECT_ID}`,
-        {
-          headers: { Authorization: `Bearer ${env.TODOIST_API_TOKEN}` },
-        }
-      );
-      if (!allResponse.ok) {
-        throw new Error(`Todoist API error: ${allResponse.status}`);
-      }
-      const tasks = await allResponse.json();
-      return tasks.find((t) => t.description?.includes(issueUrl));
+      const errorText = await response.text();
+      throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
     }
 
     const tasks = await response.json();
@@ -1305,7 +1339,6 @@ class RateLimiter {
 
 /**
  * Verify backfill request authentication
- * Uses BACKFILL_SECRET if set, falls back to GITHUB_WEBHOOK_SECRET
  */
 function verifyBackfillAuth(request, env) {
   const authHeader = request.headers.get('Authorization');
@@ -1314,14 +1347,13 @@ function verifyBackfillAuth(request, env) {
   }
 
   const token = authHeader.slice(7);
-  const secret = env.BACKFILL_SECRET || env.GITHUB_WEBHOOK_SECRET;
 
-  if (!secret) {
-    console.error('No BACKFILL_SECRET or GITHUB_WEBHOOK_SECRET configured');
+  if (!env.BACKFILL_SECRET) {
+    console.error('No BACKFILL_SECRET configured');
     return false;
   }
 
-  return timingSafeEqual(token, secret);
+  return timingSafeEqual(token, env.BACKFILL_SECRET);
 }
 
 /**
@@ -1346,9 +1378,8 @@ function validateBackfillRequest(body, env) {
 
   // For "projects" mode, owner is not required (uses ORG_MAPPINGS)
   // For other modes, owner is required
-  const effectiveOwner = owner || env.GITHUB_ORG;
-  if (mode !== 'projects' && !effectiveOwner) {
-    return { valid: false, error: 'owner is required (or set GITHUB_ORG env var)' };
+  if (mode !== 'projects' && !owner) {
+    return { valid: false, error: 'owner is required for single-repo and org modes' };
   }
 
   // For "projects" mode, ORG_MAPPINGS is required
@@ -1371,7 +1402,7 @@ function validateBackfillRequest(body, env) {
     params: {
       mode,
       repo,
-      owner: effectiveOwner,
+      owner,
       state,
       dryRun: Boolean(dryRun),
       limit: limit || Infinity,
@@ -1391,7 +1422,7 @@ async function* fetchGitHubIssues(env, owner, repo, options = {}) {
   while (fetched < limit) {
     const params = new URLSearchParams({
       state,
-      per_page: String(Math.min(100, limit - fetched)),
+      per_page: String(Math.min(CONSTANTS.PER_PAGE, limit - fetched)),
       page: String(page),
       sort: 'created',
       direction: 'asc',
@@ -1425,7 +1456,7 @@ async function* fetchGitHubIssues(env, owner, repo, options = {}) {
     }
 
     // No more pages if we got fewer than requested
-    if (issues.length < 100) break;
+    if (issues.length < CONSTANTS.PER_PAGE) break;
     page++;
   }
 }
@@ -1438,13 +1469,13 @@ async function* fetchOrgRepos(env, org) {
 
   while (true) {
     const params = new URLSearchParams({
-      per_page: '100',
+      per_page: String(CONSTANTS.PER_PAGE),
       page: String(page),
       sort: 'name',
     });
 
     const response = await fetch(
-      `https://api.github.com/orgs/${org}/repos?${params}`,
+      `${CONSTANTS.GITHUB_API_BASE}/orgs/${org}/repos?${params}`,
       {
         headers: {
           Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -1470,7 +1501,7 @@ async function* fetchOrgRepos(env, org) {
       yield { owner: org, name: repo.name };
     }
 
-    if (repos.length < 100) break;
+    if (repos.length < CONSTANTS.PER_PAGE) break;
     page++;
   }
 }
@@ -1483,13 +1514,13 @@ async function* fetchUserRepos(env, user) {
 
   while (true) {
     const params = new URLSearchParams({
-      per_page: '100',
+      per_page: String(CONSTANTS.PER_PAGE),
       page: String(page),
       sort: 'name',
     });
 
     const response = await fetch(
-      `https://api.github.com/users/${user}/repos?${params}`,
+      `${CONSTANTS.GITHUB_API_BASE}/users/${user}/repos?${params}`,
       {
         headers: {
           Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -1510,7 +1541,7 @@ async function* fetchUserRepos(env, user) {
       yield { owner: user, name: repo.name };
     }
 
-    if (repos.length < 100) break;
+    if (repos.length < CONSTANTS.PER_PAGE) break;
     page++;
   }
 }
@@ -1535,15 +1566,18 @@ async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId 
       return { status: 'would_create' };
     }
 
+    // For actual task creation, projectId is required (use 'projects' mode)
+    if (!projectId) {
+      return { status: 'failed', error: 'projectId required - use "projects" mode for task creation' };
+    }
+
     const [, repoName] = repoFullName.split('/');
     const task = await createTodoistTask(env, {
       title: issue.title,
       issueNumber: issue.number,
       repoName: repoName,
-      repoFullName: repoFullName,
       issueUrl: issue.html_url,
       projectId: projectId,
-      labels: issue.labels?.map((l) => l.name) || [],
     });
 
     return { status: 'created', taskId: task.id };
@@ -1557,7 +1591,7 @@ async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId 
  * Main backfill handler
  * Supports streaming NDJSON response for real-time progress
  */
-async function handleBackfill(request, env, ctx) {
+async function handleBackfill(request, env, _ctx) {
   // Authenticate
   if (!verifyBackfillAuth(request, env)) {
     return new Response('Unauthorized', { status: 401 });
@@ -1590,8 +1624,8 @@ async function handleBackfill(request, env, ctx) {
   // Process and stream results (not using ctx.waitUntil so stream is properly consumed)
   const processBackfill = async () => {
     const summary = { total: 0, created: 0, skipped: 0, failed: 0 };
-    const githubLimiter = new RateLimiter(60);
-    const todoistLimiter = new RateLimiter(300);
+    const githubLimiter = new RateLimiter(CONSTANTS.GITHUB_RATE_LIMIT);
+    const todoistLimiter = new RateLimiter(CONSTANTS.TODOIST_RATE_LIMIT);
 
     try {
       // Get list of repos to process (with optional projectId for task creation)

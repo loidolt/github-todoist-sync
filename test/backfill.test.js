@@ -8,8 +8,7 @@ import {
 import worker from '../src/worker.js';
 
 // Helper to create backfill request with Bearer auth
-// Uses BACKFILL_SECRET if available, otherwise falls back to GITHUB_WEBHOOK_SECRET
-function createBackfillRequest(body, secret = env.BACKFILL_SECRET || env.GITHUB_WEBHOOK_SECRET) {
+function createBackfillRequest(body, secret = env.BACKFILL_SECRET) {
   return new Request('http://localhost/backfill', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -88,7 +87,7 @@ describe('Backfill Request Validation', () => {
       method: 'POST',
       body: 'invalid json',
       headers: {
-        Authorization: `Bearer ${env.BACKFILL_SECRET || env.GITHUB_WEBHOOK_SECRET}`,
+        Authorization: `Bearer ${env.BACKFILL_SECRET}`,
         'Content-Type': 'application/json',
       },
     });
@@ -291,8 +290,10 @@ describe('Backfill Single Repo', () => {
     expect(complete.summary.skipped).toBe(1);
   });
 
-  it('creates tasks when not in dry-run mode', async () => {
-    // Use unique repo name to avoid mock conflicts
+  it('fails gracefully without projectId when not in dry-run mode', async () => {
+    // Single-repo mode without projectId should fail gracefully
+    // because we don't know which Todoist project to create tasks in.
+    // Use 'projects' mode for actual task creation.
     fetchMock
       .get('https://api.github.com')
       .intercept({ path: /\/repos\/test-org\/create-task-repo\/issues/ })
@@ -311,12 +312,6 @@ describe('Backfill Single Repo', () => {
       .intercept({ path: /\/rest\/v2\/tasks/ })
       .reply(200, []);
 
-    // Mock Todoist task creation
-    fetchMock
-      .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
-      .reply(201, { id: 'new-task-123', content: '[create-task-repo#1] Test Issue 1' });
-
     const request = createBackfillRequest({
       mode: 'single-repo',
       repo: 'create-task-repo',
@@ -331,11 +326,12 @@ describe('Backfill Single Repo', () => {
     const events = await readNDJSONStream(response);
     const issueEvents = events.filter((e) => e.type === 'issue');
 
-    expect(issueEvents[0].status).toBe('created');
-    expect(issueEvents[0].taskId).toBe('new-task-123');
+    // Should fail because single-repo mode doesn't provide projectId
+    expect(issueEvents[0].status).toBe('failed');
+    expect(issueEvents[0].error).toContain('projectId required');
 
     const complete = events.find((e) => e.type === 'complete');
-    expect(complete.summary.created).toBe(1);
+    expect(complete.summary.failed).toBe(1);
   });
 
   it('filters out pull requests', async () => {
@@ -634,20 +630,20 @@ describe('Backfill Projects Mode', () => {
       .reply(200, {
         projects: [
           { id: '1000', name: 'Test Org Issues', parent_id: null },
-          { id: '1001', name: 'my-repo', parent_id: '1000' },
+          { id: '1001', name: 'sub-proj-repo', parent_id: '1000' },
         ],
         sync_token: 'test-token',
       });
 
-    // Mock GitHub issues
+    // Mock GitHub issues - use unique repo name
     fetchMock
       .get('https://api.github.com')
-      .intercept({ path: /\/repos\/test-org\/my-repo\/issues/ })
+      .intercept({ path: /\/repos\/test-org\/sub-proj-repo\/issues/ })
       .reply(200, [
         {
-          number: 42,
-          title: 'Test Issue',
-          html_url: 'https://github.com/test-org/my-repo/issues/42',
+          number: 99,
+          title: 'Subproject Test Issue',
+          html_url: 'https://github.com/test-org/sub-proj-repo/issues/99',
           labels: [],
         },
       ]);
@@ -658,11 +654,11 @@ describe('Backfill Projects Mode', () => {
       .intercept({ path: /\/rest\/v2\/tasks/ })
       .reply(200, []);
 
-    // Mock Todoist task creation
+    // Mock Todoist task creation - use unique task id
     fetchMock
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/rest/v2/tasks' })
-      .reply(201, { id: 'new-task-456', content: '[my-repo#42] Test Issue' });
+      .reply(201, { id: 'created-subproj-task', content: '[sub-proj-repo#99] Subproject Test Issue' });
 
     const request = createBackfillRequest({
       mode: 'projects',
@@ -677,7 +673,7 @@ describe('Backfill Projects Mode', () => {
 
     const issueEvent = events.find((e) => e.type === 'issue');
     expect(issueEvent.status).toBe('created');
-    expect(issueEvent.taskId).toBe('new-task-456');
+    expect(issueEvent.taskId).toBe('created-subproj-task');
     expect(issueEvent.projectId).toBe('1001');
 
     const complete = events.find((e) => e.type === 'complete');

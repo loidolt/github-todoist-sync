@@ -169,9 +169,11 @@ curl -X POST https://your-worker.workers.dev/backfill \
 - `limit`: Max issues to process per repo (optional)
 
 **Modes:**
-- `"projects"` - **Recommended.** Uses your Todoist project hierarchy to determine which repos to sync. Tasks are created in the correct sub-projects.
-- `"single-repo"` - Backfill a specific repo (requires `repo` and `owner`)
-- `"org"` - Backfill all repos in an org (requires `owner`)
+- `"projects"` - **Recommended.** Uses your Todoist project hierarchy to determine which repos to sync. Tasks are created in the correct sub-projects. Required for actual task creation.
+- `"single-repo"` - Preview issues in a specific repo (requires `repo` and `owner`). Best used with `dryRun: true` for discovery.
+- `"org"` - Preview issues in all repos of an org (requires `owner`). Best used with `dryRun: true` for discovery.
+
+**Note:** Only `"projects"` mode can create tasks because it knows which Todoist sub-project to use for each repo. Use `single-repo` and `org` modes with `dryRun: true` to preview which issues would be synced.
 
 **Response:** Streaming NDJSON with real-time progress:
 ```json
