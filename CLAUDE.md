@@ -131,11 +131,49 @@ curl https://your-worker.workers.dev/sync-status
   - Parent projects map to GitHub organizations
   - Sub-projects map to repository names
   - Supports multiple organizations via `ORG_MAPPINGS`
+- **Milestone/Section sync**: GitHub milestones map bidirectionally to Todoist sections
+  - Issues with milestones → tasks placed in sections named after the milestone
+  - Tasks in sections → issues created with matching milestone
+  - Milestone changes on GitHub → task moves to new section
+  - Section changes in Todoist → issue milestone updated
+  - Issues without milestones stay outside any section
 - **Auto-backfill for new projects**: When you add a new sub-project in Todoist, the next sync automatically backfills all open GitHub issues from that repo. Simply add a sub-project named after your repo and issues will be synced on the next cycle.
 - **Duplicate prevention**: Checks existing tasks before creating new ones (uses batch API calls for efficiency)
 - **Loop prevention**: Tasks with GitHub URLs in description won't create new issues
 - **Retry logic**: Exponential backoff for transient API failures
 - **Efficient queries**: Uses Todoist Sync API with incremental sync tokens and batch task fetching
+
+### Milestone to Section Mapping
+
+GitHub milestones are automatically synced to Todoist sections within sub-projects:
+
+**How it works:**
+- When a GitHub issue has a milestone (e.g., "v1.0"), the corresponding Todoist task is placed in a section named "v1.0"
+- If the section doesn't exist, it's automatically created
+- When the milestone changes, the task is moved to the new section
+- When a Todoist task is created in a section, the GitHub issue is created with the matching milestone (if it exists in the repo)
+- Tasks/issues without milestones/sections stay in the default area (outside any section)
+
+**Example:**
+```
+GitHub Repo: my-org/api
+├── Issue #1 "Fix bug" (milestone: v1.0)
+├── Issue #2 "Add feature" (milestone: v2.0)
+└── Issue #3 "Update docs" (no milestone)
+
+Todoist Sub-Project: api
+├── Section: v1.0
+│   └── [api#1] Fix bug
+├── Section: v2.0
+│   └── [api#2] Add feature
+└── (no section)
+    └── [api#3] Update docs
+```
+
+**Notes:**
+- Section names match milestone titles exactly (case-sensitive)
+- Milestones must exist in GitHub before they can be assigned via Todoist sections
+- Sections are created automatically when needed, but milestones are NOT auto-created
 
 ### Backfill Endpoint
 

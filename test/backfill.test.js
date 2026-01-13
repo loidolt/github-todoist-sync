@@ -29,6 +29,14 @@ async function readNDJSONStream(response) {
     .map((line) => JSON.parse(line));
 }
 
+// Helper to mock Todoist sections endpoint (required for milestone sync)
+function mockTodoistSections(fetchMock, projectId, sections = []) {
+  fetchMock
+    .get('https://api.todoist.com')
+    .intercept({ path: `/rest/v2/sections?project_id=${projectId}` })
+    .reply(200, sections);
+}
+
 describe('Backfill Authentication', () => {
   it('returns 401 without Authorization header', async () => {
     const request = new Request('http://localhost/backfill', {
@@ -570,6 +578,10 @@ describe('Backfill Projects Mode', () => {
         sync_token: 'test-token',
       });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, '1001');
+    mockTodoistSections(fetchMock, '1002');
+
     // Mock Todoist batch task fetch (second sync call for existing tasks)
     fetchMock
       .get('https://api.todoist.com')
@@ -635,6 +647,9 @@ describe('Backfill Projects Mode', () => {
         sync_token: 'test-token',
       });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, '1001');
+
     // Mock Todoist batch task fetch (second sync call - no existing tasks)
     fetchMock
       .get('https://api.todoist.com')
@@ -692,6 +707,9 @@ describe('Backfill Projects Mode', () => {
         ],
         sync_token: 'projects-token',
       });
+
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, '1001');
 
     // Mock Todoist batch task fetch (second sync call for items)
     // This returns existing tasks with GitHub URLs

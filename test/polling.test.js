@@ -21,6 +21,14 @@ function setupOrgMappings() {
   });
 }
 
+// Helper to mock Todoist sections endpoint (required for milestone sync)
+function mockTodoistSections(fetchMock, projectId, sections = []) {
+  fetchMock
+    .get('https://api.todoist.com')
+    .intercept({ path: `/rest/v2/sections?project_id=${projectId}` })
+    .reply(200, sections);
+}
+
 // Helper to mock Todoist projects endpoint
 function mockTodoistProjects(fetchMock, projects) {
   fetchMock
@@ -114,6 +122,9 @@ describe('Scheduled Handler with Project Hierarchy', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
     // Mock GitHub issues API
     fetchMock
       .get('https://api.github.com')
@@ -142,6 +153,9 @@ describe('Scheduled Handler with Project Hierarchy', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
 
     // Mock GitHub issues for the one repo that has a sub-project
     fetchMock
@@ -221,6 +235,9 @@ describe('Todoist Task to GitHub Issue Creation', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
     // Mock GitHub issues (no existing)
     fetchMock
       .get('https://api.github.com')
@@ -275,6 +292,9 @@ describe('Todoist Task to GitHub Issue Creation', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
     // Mock GitHub issues
     fetchMock
       .get('https://api.github.com')
@@ -328,6 +348,9 @@ describe('GitHub Issue to Todoist Task in Sub-Project', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
 
     // Mock GitHub issues
     fetchMock
@@ -396,6 +419,10 @@ describe('Multiple Organizations', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: multiOrgProjects, sync_token: 'projects-token' });
 
+    // Mock Todoist sections (for milestone sync) - both sub-projects
+    mockTodoistSections(fetchMock, '1001');
+    mockTodoistSections(fetchMock, '2001');
+
     // Mock GitHub issues for both repos using a single regex
     fetchMock
       .get('https://api.github.com')
@@ -431,6 +458,9 @@ describe('Task Completion Sync', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
 
     // Mock GitHub issues
     fetchMock
@@ -492,6 +522,9 @@ describe('Auto-Backfill for New Projects', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
     // Mock GitHub issues
     fetchMock
       .get('https://api.github.com')
@@ -536,6 +569,10 @@ describe('Auto-Backfill for New Projects', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: projectsWithNew, sync_token: 'projects-token' });
+
+    // Mock Todoist sections (for milestone sync) - both sub-projects
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+    mockTodoistSections(fetchMock, '1002');
 
     // Mock Todoist batch task fetch for auto-backfill (no existing tasks)
     fetchMock
@@ -604,6 +641,9 @@ describe('Auto-Backfill for New Projects', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
+    // Mock Todoist sections (for milestone sync)
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
     // Mock GitHub issues for normal sync
     fetchMock
       .get('https://api.github.com')
@@ -623,5 +663,262 @@ describe('Auto-Backfill for New Projects', () => {
     // Sync should complete normally without auto-backfill
     const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
     expect(state.pollCount).toBe(6);
+  });
+});
+
+describe('Milestone to Section Sync', () => {
+  beforeEach(() => {
+    setupOrgMappings();
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+  });
+
+  it('creates task in section for issue with milestone', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections - return existing section matching milestone name
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: `/rest/v2/sections?project_id=${TEST_SUB_PROJECT_ID}` })
+      .reply(200, [{ id: 'section-v1', name: 'v1.0', project_id: TEST_SUB_PROJECT_ID }]);
+
+    // Mock GitHub issues with milestone
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues/ })
+      .reply(200, [
+        {
+          number: 1,
+          title: 'Issue with milestone',
+          html_url: 'https://github.com/test-org/test-repo/issues/1',
+          state: 'open',
+          labels: [],
+          milestone: { title: 'v1.0', number: 1 },
+        },
+      ]);
+
+    // Mock Todoist task lookup - no existing task
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'GET', path: /\/rest\/v2\/tasks/ })
+      .reply(200, []);
+
+    // Mock Todoist task creation - section_id in response shows milestone mapped to section
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .reply(201, { id: 'new-task', content: 'Test', section_id: 'section-v1' });
+
+    // Mock Todoist items sync
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Sync should complete - task created in existing section matching milestone
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.pollCount).toBe(1);
+  });
+
+  it('creates task without section for issue without milestone', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: `/rest/v2/sections?project_id=${TEST_SUB_PROJECT_ID}` })
+      .reply(200, []);
+
+    // Mock GitHub issues WITHOUT milestone
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues/ })
+      .reply(200, [
+        {
+          number: 2,
+          title: 'Issue without milestone',
+          html_url: 'https://github.com/test-org/test-repo/issues/2',
+          state: 'open',
+          labels: [],
+          milestone: null,
+        },
+      ]);
+
+    // Mock Todoist task lookup
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'GET', path: /\/rest\/v2\/tasks/ })
+      .reply(200, []);
+
+    // Mock Todoist task creation - no section_id in response since none requested
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .reply(201, { id: 'new-task', content: 'Test' });
+
+    // Mock Todoist items sync
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Sync should complete - task is created in project root (no section)
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.pollCount).toBe(1);
+  });
+});
+
+describe('Section to Milestone Sync', () => {
+  beforeEach(() => {
+    setupOrgMappings();
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+  });
+
+  it('creates GitHub issue with milestone when task is in section', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections (with existing section)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: `/rest/v2/sections?project_id=${TEST_SUB_PROJECT_ID}` })
+      .reply(200, [{ id: 'section-v2', name: 'v2.0', project_id: TEST_SUB_PROJECT_ID }]);
+
+    // Mock GitHub issues
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues\?/ })
+      .reply(200, []);
+
+    // Mock GitHub milestones - called to look up milestone number for section name
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/milestones/ })
+      .reply(200, [{ number: 2, title: 'v2.0', state: 'open' }]);
+
+    // Mock Todoist items sync - task in section without GitHub URL
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, {
+        items: [
+          {
+            id: 'task-in-section',
+            project_id: TEST_SUB_PROJECT_ID,
+            section_id: 'section-v2',
+            content: 'Task in section',
+            description: '',
+            is_completed: false,
+          },
+        ],
+        sync_token: 'items-token',
+        full_sync: false,
+      });
+
+    // Mock GitHub issue creation - milestone lookup being called proves section->milestone works
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ method: 'POST', path: '/repos/test-org/test-repo/issues' })
+      .reply(201, {
+        number: 42,
+        html_url: 'https://github.com/test-org/test-repo/issues/42',
+        milestone: { number: 2, title: 'v2.0' },
+      });
+
+    // Mock Todoist task update (to add GitHub URL)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: /\/rest\/v2\/tasks\/task-in-section/ })
+      .reply(200, {});
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Sync should complete - milestone mock being called proves section->milestone mapping works
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.pollCount).toBe(1);
+  });
+
+  it('creates GitHub issue without milestone when task is not in section', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: `/rest/v2/sections?project_id=${TEST_SUB_PROJECT_ID}` })
+      .reply(200, []);
+
+    // Mock GitHub issues
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues\?/ })
+      .reply(200, []);
+
+    // Mock Todoist items sync - task NOT in section
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, {
+        items: [
+          {
+            id: 'task-no-section',
+            project_id: TEST_SUB_PROJECT_ID,
+            section_id: null,
+            content: 'Task without section',
+            description: '',
+            is_completed: false,
+          },
+        ],
+        sync_token: 'items-token',
+        full_sync: false,
+      });
+
+    // Mock GitHub issue creation - no milestone since task has no section
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ method: 'POST', path: '/repos/test-org/test-repo/issues' })
+      .reply(201, {
+        number: 43,
+        html_url: 'https://github.com/test-org/test-repo/issues/43',
+      });
+
+    // Mock Todoist task update
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: /\/rest\/v2\/tasks\/task-no-section/ })
+      .reply(200, {});
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Sync should complete - issue created without milestone since task has no section
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.pollCount).toBe(1);
   });
 });

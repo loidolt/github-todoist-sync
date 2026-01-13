@@ -511,6 +511,284 @@ function buildProjectHierarchy(projects, orgMappings) {
 }
 
 // =============================================================================
+// Section Management (for milestone-based sections)
+// =============================================================================
+
+/**
+ * Fetch all sections for a Todoist project
+ * Returns array of section objects { id, name, project_id, order }
+ */
+async function fetchSectionsForProject(env, projectId) {
+  return withRetry(async () => {
+    const response = await fetch(
+      `https://api.todoist.com/rest/v2/sections?project_id=${projectId}`,
+      {
+        headers: { Authorization: `Bearer ${env.TODOIST_API_TOKEN}` },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
+    }
+
+    return response.json();
+  });
+}
+
+/**
+ * Fetch sections for multiple projects and build caches
+ * Returns { sectionCache: Map<projectId, Map<name, id>>, sectionIdToName: Map<projectId, Map<id, name>> }
+ */
+async function fetchSectionsForProjects(env, projectIds) {
+  const sectionCache = new Map(); // projectId -> Map<sectionName, sectionId>
+  const sectionIdToName = new Map(); // projectId -> Map<sectionId, sectionName>
+
+  // Fetch sections for each project (could parallelize but respecting rate limits)
+  for (const projectId of projectIds) {
+    try {
+      const sections = await fetchSectionsForProject(env, projectId);
+
+      const nameToId = new Map();
+      const idToName = new Map();
+
+      for (const section of sections) {
+        nameToId.set(section.name, section.id);
+        idToName.set(String(section.id), section.name);
+      }
+
+      sectionCache.set(String(projectId), nameToId);
+      sectionIdToName.set(String(projectId), idToName);
+    } catch (error) {
+      console.error(`Failed to fetch sections for project ${projectId}:`, error);
+      // Continue with other projects, use empty maps for this one
+      sectionCache.set(String(projectId), new Map());
+      sectionIdToName.set(String(projectId), new Map());
+    }
+  }
+
+  const totalSections = Array.from(sectionCache.values()).reduce((sum, m) => sum + m.size, 0);
+  console.log(`Fetched ${totalSections} sections across ${projectIds.length} projects`);
+
+  return { sectionCache, sectionIdToName };
+}
+
+/**
+ * Create a new section in a Todoist project
+ */
+async function createTodoistSection(env, projectId, name) {
+  return withRetry(async () => {
+    const response = await fetch('https://api.todoist.com/rest/v2/sections', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ project_id: projectId, name }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
+    }
+
+    return response.json();
+  });
+}
+
+/**
+ * Get or create a section for a milestone name
+ * Uses cache to minimize API calls, creates section if not found
+ */
+async function getOrCreateSection(env, projectId, milestoneName, sectionCache) {
+  const projectIdStr = String(projectId);
+
+  // Check cache
+  let projectSections = sectionCache.get(projectIdStr);
+  if (projectSections?.has(milestoneName)) {
+    return projectSections.get(milestoneName);
+  }
+
+  // Refresh cache from API (in case section was created by another process)
+  try {
+    const sections = await fetchSectionsForProject(env, projectId);
+    projectSections = new Map();
+    for (const section of sections) {
+      projectSections.set(section.name, section.id);
+    }
+    sectionCache.set(projectIdStr, projectSections);
+
+    // Check again after refresh
+    if (projectSections.has(milestoneName)) {
+      return projectSections.get(milestoneName);
+    }
+  } catch (error) {
+    console.error(`Failed to refresh sections for project ${projectId}:`, error);
+  }
+
+  // Create new section
+  try {
+    console.log(`Creating section "${milestoneName}" in project ${projectId}`);
+    const section = await createTodoistSection(env, projectId, milestoneName);
+
+    // Update cache
+    if (!projectSections) {
+      projectSections = new Map();
+      sectionCache.set(projectIdStr, projectSections);
+    }
+    projectSections.set(milestoneName, section.id);
+
+    return section.id;
+  } catch (error) {
+    // Handle race condition - section might have been created by another request
+    if (error.message.includes('already exists') || error.message.includes('409')) {
+      console.log(`Section "${milestoneName}" already exists, refreshing cache`);
+      const sections = await fetchSectionsForProject(env, projectId);
+      for (const section of sections) {
+        if (section.name === milestoneName) {
+          sectionCache.get(projectIdStr)?.set(milestoneName, section.id);
+          return section.id;
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+/**
+ * Update a Todoist task's section
+ * sectionId can be null to remove from section
+ */
+async function updateTodoistTaskSection(env, taskId, sectionId) {
+  return withRetry(async () => {
+    const response = await fetch(
+      `https://api.todoist.com/rest/v2/tasks/${taskId}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ section_id: sectionId }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
+    }
+  });
+}
+
+// =============================================================================
+// Milestone Management (for section-based milestones)
+// =============================================================================
+
+/**
+ * Fetch all milestones for a GitHub repository
+ * Returns array of milestone objects { number, title, state, ... }
+ */
+async function fetchMilestonesForRepo(env, owner, repo) {
+  return withRetry(async () => {
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/milestones?state=all&per_page=100`,
+      {
+        headers: {
+          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'GitHub-Todoist-Sync-Worker',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`GitHub API error: ${response.status} - ${errorText}`);
+    }
+
+    return response.json();
+  });
+}
+
+/**
+ * Fetch milestones for a repo and build caches
+ * Returns { milestoneCache: Map<title, number>, milestoneNumberToTitle: Map<number, title> }
+ */
+async function getMilestoneCaches(env, owner, repo, existingCache = null) {
+  const repoKey = `${owner}/${repo}`;
+
+  // Return existing cache if available
+  if (existingCache?.has(repoKey)) {
+    return existingCache.get(repoKey);
+  }
+
+  const milestones = await fetchMilestonesForRepo(env, owner, repo);
+
+  const titleToNumber = new Map();
+  const numberToTitle = new Map();
+
+  for (const milestone of milestones) {
+    titleToNumber.set(milestone.title, milestone.number);
+    numberToTitle.set(milestone.number, milestone.title);
+  }
+
+  const caches = { titleToNumber, numberToTitle };
+
+  if (existingCache) {
+    existingCache.set(repoKey, caches);
+  }
+
+  return caches;
+}
+
+/**
+ * Get milestone number from title for a repo
+ * Returns null if milestone doesn't exist
+ */
+async function getMilestoneNumber(env, owner, repo, milestoneTitle, milestoneCache) {
+  const caches = await getMilestoneCaches(env, owner, repo, milestoneCache);
+  return caches.titleToNumber.get(milestoneTitle) || null;
+}
+
+/**
+ * Get milestone title from number for a repo
+ * Returns null if milestone doesn't exist
+ */
+async function getMilestoneTitle(env, owner, repo, milestoneNumber, milestoneCache) {
+  const caches = await getMilestoneCaches(env, owner, repo, milestoneCache);
+  return caches.numberToTitle.get(milestoneNumber) || null;
+}
+
+/**
+ * Update a GitHub issue's milestone
+ * milestoneNumber can be null to clear milestone
+ */
+async function updateGitHubIssueMilestone(env, owner, repo, issueNumber, milestoneNumber) {
+  return withRetry(async () => {
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+          Accept: 'application/vnd.github.v3+json',
+          'User-Agent': 'GitHub-Todoist-Sync-Worker',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ milestone: milestoneNumber }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`GitHub API error: ${response.status} - ${errorText}`);
+    }
+
+    return response.json();
+  });
+}
+
+// =============================================================================
 // GitHub Polling
 // =============================================================================
 
@@ -669,12 +947,25 @@ async function pollTodoistChanges(env, syncToken, projectHierarchy) {
  * Sync a GitHub issue to Todoist
  * Creates task if missing, updates state if changed
  * Uses _todoistProjectId from issue to determine which sub-project to create task in
+ * Handles milestone-to-section mapping when sectionCache is provided
  */
-async function syncIssueToTodoist(env, issue) {
+async function syncIssueToTodoist(env, issue, sectionCache = null) {
   const issueUrl = issue.html_url;
   const repoName = issue._repoName;
   const repoFullName = issue._repoFullName;
   const projectId = issue._todoistProjectId;
+
+  // Determine target section based on milestone
+  let targetSectionId = null;
+  const milestoneName = issue.milestone?.title;
+  if (milestoneName && sectionCache) {
+    try {
+      targetSectionId = await getOrCreateSection(env, projectId, milestoneName, sectionCache);
+    } catch (error) {
+      console.error(`Failed to get/create section for milestone "${milestoneName}":`, error);
+      // Continue without section - don't fail the sync
+    }
+  }
 
   // Find existing task
   const task = await findTodoistTaskByIssueUrl(env, issueUrl);
@@ -682,15 +973,17 @@ async function syncIssueToTodoist(env, issue) {
   if (!task) {
     // No task exists - create if issue is open
     if (issue.state === 'open') {
-      console.log(`Creating task for open issue: ${repoFullName}#${issue.number} in project ${projectId}`);
+      const sectionInfo = targetSectionId ? ` in section "${milestoneName}"` : '';
+      console.log(`Creating task for open issue: ${repoFullName}#${issue.number} in project ${projectId}${sectionInfo}`);
       await createTodoistTask(env, {
         title: issue.title,
         issueNumber: issue.number,
         repoName: repoName,
         issueUrl: issueUrl,
-        projectId: projectId, // Create in the sub-project for this repo
+        projectId: projectId,
+        sectionId: targetSectionId,
       });
-      return { action: 'created', issue: `${repoFullName}#${issue.number}` };
+      return { action: 'created', issue: `${repoFullName}#${issue.number}`, section: milestoneName || null };
     }
     return { action: 'skipped', reason: 'closed_no_task', issue: `${repoFullName}#${issue.number}` };
   }
@@ -712,9 +1005,26 @@ async function syncIssueToTodoist(env, issue) {
 
   // Check for title changes
   const expectedTitle = `[${repoName}#${issue.number}] ${issue.title}`;
+  let updated = false;
+
   if (task.content !== expectedTitle) {
     console.log(`Updating task title for issue: ${repoFullName}#${issue.number}`);
     await updateTodoistTask(env, task.id, { content: expectedTitle });
+    updated = true;
+  }
+
+  // Check if section needs updating (milestone changed)
+  const currentSectionId = task.section_id ? String(task.section_id) : null;
+  const targetSectionIdStr = targetSectionId ? String(targetSectionId) : null;
+
+  if (currentSectionId !== targetSectionIdStr && sectionCache) {
+    const sectionInfo = milestoneName ? ` to section "${milestoneName}"` : ' (removing from section)';
+    console.log(`Moving task for issue ${repoFullName}#${issue.number}${sectionInfo}`);
+    await updateTodoistTaskSection(env, task.id, targetSectionId);
+    return { action: 'section_updated', issue: `${repoFullName}#${issue.number}`, section: milestoneName || null };
+  }
+
+  if (updated) {
     return { action: 'updated', issue: `${repoFullName}#${issue.number}` };
   }
 
@@ -725,8 +1035,9 @@ async function syncIssueToTodoist(env, issue) {
  * Sync a Todoist task to GitHub
  * Uses project hierarchy to determine org/repo (from _githubOrg and _repoName added during polling)
  * Falls back to parsing GitHub URL from description for tasks created from GitHub
+ * Handles section-to-milestone mapping when sectionIdToName and milestoneCache are provided
  */
-async function syncTaskToGitHub(env, task) {
+async function syncTaskToGitHub(env, task, sectionIdToName = null, milestoneCache = null) {
   // First check if task has GitHub URL (was created from GitHub issue)
   const githubInfo = parseGitHubUrl(task.description);
 
@@ -752,6 +1063,43 @@ async function syncTaskToGitHub(env, task) {
       return { action: 'reopened', issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}` };
     }
 
+    // Check if section changed and needs to sync milestone (bidirectional)
+    if (sectionIdToName && milestoneCache) {
+      const projectIdStr = String(task.project_id);
+      const taskSectionId = task.section_id ? String(task.section_id) : null;
+
+      // Get section name from task's section_id
+      const projectSectionIdToName = sectionIdToName.get(projectIdStr);
+      const taskSectionName = taskSectionId && projectSectionIdToName
+        ? projectSectionIdToName.get(taskSectionId)
+        : null;
+
+      // Get current milestone from GitHub issue
+      const currentMilestoneName = issue.milestone?.title || null;
+
+      // If they differ, update GitHub milestone
+      if (taskSectionName !== currentMilestoneName) {
+        try {
+          // Get milestone number from name (or null to clear)
+          const milestoneNumber = taskSectionName
+            ? await getMilestoneNumber(env, githubInfo.owner, githubInfo.repo, taskSectionName, milestoneCache)
+            : null;
+
+          // Only update if we can find the milestone or we're clearing it
+          if (milestoneNumber !== null || taskSectionName === null) {
+            console.log(`Updating milestone for issue ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}: "${currentMilestoneName}" → "${taskSectionName}"`);
+            await updateGitHubIssueMilestone(env, githubInfo.owner, githubInfo.repo, githubInfo.issueNumber, milestoneNumber);
+            return { action: 'milestone_updated', issue: `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`, milestone: taskSectionName };
+          } else if (taskSectionName) {
+            console.warn(`Cannot find milestone "${taskSectionName}" in ${githubInfo.owner}/${githubInfo.repo} - skipping milestone update`);
+          }
+        } catch (error) {
+          console.error(`Failed to update milestone for issue ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}:`, error);
+          // Continue without updating milestone
+        }
+      }
+    }
+
     return { action: 'unchanged', taskId: task.id };
   }
 
@@ -766,21 +1114,48 @@ async function syncTaskToGitHub(env, task) {
     return { action: 'skipped', reason: 'completed_no_issue', taskId: task.id };
   }
 
+  // Determine milestone from section (if task is in a section)
+  let milestoneNumber = null;
+  let milestoneName = null;
+
+  if (sectionIdToName && milestoneCache && task.section_id) {
+    const projectIdStr = String(task.project_id);
+    const taskSectionId = String(task.section_id);
+    const projectSectionIdToName = sectionIdToName.get(projectIdStr);
+
+    if (projectSectionIdToName) {
+      milestoneName = projectSectionIdToName.get(taskSectionId);
+      if (milestoneName) {
+        try {
+          milestoneNumber = await getMilestoneNumber(env, task._githubOrg, task._repoName, milestoneName, milestoneCache);
+          if (!milestoneNumber) {
+            console.warn(`Milestone "${milestoneName}" not found in ${task._fullRepo} - creating issue without milestone`);
+          }
+        } catch (error) {
+          console.error(`Failed to get milestone for ${task._fullRepo}:`, error);
+          // Continue without milestone
+        }
+      }
+    }
+  }
+
   // Create GitHub issue for this task
-  console.log(`Creating GitHub issue for task: ${task._fullRepo} - ${task.content}`);
+  const milestoneInfo = milestoneNumber ? ` with milestone "${milestoneName}"` : '';
+  console.log(`Creating GitHub issue for task: ${task._fullRepo} - ${task.content}${milestoneInfo}`);
   try {
     const issue = await createGitHubIssue(env, {
       owner: task._githubOrg,
       repo: task._repoName,
       title: task.content,
       body: task.description || `Created from Todoist task: ${task.id}`,
+      milestone: milestoneNumber,
     });
 
     // Update task description with GitHub URL (for bidirectional sync)
     await updateTodoistTaskDescription(env, task.id, issue.html_url);
     console.log(`Created GitHub issue: ${issue.html_url}`);
 
-    return { action: 'created_issue', issue: issue.html_url, taskId: task.id };
+    return { action: 'created_issue', issue: issue.html_url, taskId: task.id, milestone: milestoneName };
   } catch (error) {
     console.error(`Failed to create GitHub issue for task ${task.id}:`, error);
     return { action: 'error', error: error.message, taskId: task.id };
@@ -823,6 +1198,10 @@ async function getGitHubIssue(env, { owner, repo, issueNumber }) {
  * - Parent projects map to GitHub organizations (via ORG_MAPPINGS)
  * - Sub-projects map to repositories (sub-project name = repo name)
  *
+ * Milestone/Section sync:
+ * - GitHub milestones map to Todoist sections (within sub-projects)
+ * - Syncs bidirectionally: milestone changes → section changes, and vice versa
+ *
  * Auto-backfill: When new sub-projects are detected, automatically backfills
  * their GitHub issues to Todoist tasks.
  */
@@ -835,8 +1214,8 @@ async function performBidirectionalSync(env) {
   console.log(`Last sync: ${state.lastPollTime || 'never'}, Poll count: ${state.pollCount}`);
 
   const results = {
-    github: { processed: 0, created: 0, updated: 0, completed: 0, reopened: 0, errors: 0 },
-    todoist: { processed: 0, closed: 0, reopened: 0, created_issues: 0, errors: 0 },
+    github: { processed: 0, created: 0, updated: 0, completed: 0, reopened: 0, section_updated: 0, errors: 0 },
+    todoist: { processed: 0, closed: 0, reopened: 0, created_issues: 0, milestone_updated: 0, errors: 0 },
     autoBackfill: { newProjects: 0, issues: 0, created: 0, skipped: 0, errors: 0 },
   };
 
@@ -858,9 +1237,16 @@ async function performBidirectionalSync(env) {
       return { success: true, duration: Date.now() - startTime, results, warning: 'No repos configured' };
     }
 
+    // Pre-fetch sections for all sub-projects (for milestone<->section mapping)
+    const currentProjectIds = Array.from(projectHierarchy.subProjects.keys());
+    console.log('Fetching sections for milestone mapping...');
+    const { sectionCache, sectionIdToName } = await fetchSectionsForProjects(env, currentProjectIds);
+
+    // Initialize milestone cache (populated lazily per-repo)
+    const milestoneCache = new Map();
+
     // Detect new projects for auto-backfill
     // Only auto-backfill if we have known projects (skip on first sync to avoid backfilling everything)
-    const currentProjectIds = Array.from(projectHierarchy.subProjects.keys());
     const knownProjectIds = new Set(state.knownProjectIds || []);
     const hasKnownProjects = state.knownProjectIds !== undefined && state.knownProjectIds.length > 0;
     const newProjectIds = currentProjectIds.filter((id) => !knownProjectIds.has(id));
@@ -870,7 +1256,7 @@ async function performBidirectionalSync(env) {
       console.log(`Detected ${newProjectIds.length} new project(s) for auto-backfill:`, newProjectIds);
       results.autoBackfill.newProjects = newProjectIds.length;
 
-      await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill);
+      await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill, sectionCache);
     } else if (!hasKnownProjects) {
       // No baseline yet - record current projects without backfilling
       if (state.pollCount > 0) {
@@ -895,15 +1281,16 @@ async function performBidirectionalSync(env) {
     const githubIssues = await pollGitHubChanges(env, state.lastGitHubSync, projectHierarchy);
     console.log(`Found ${githubIssues.length} GitHub issues to process`);
 
-    // Process GitHub -> Todoist sync
+    // Process GitHub -> Todoist sync (with section cache for milestone mapping)
     for (const issue of githubIssues) {
       try {
-        const result = await syncIssueToTodoist(env, issue);
+        const result = await syncIssueToTodoist(env, issue, sectionCache);
         results.github.processed++;
         if (result.action === 'created') results.github.created++;
         else if (result.action === 'updated') results.github.updated++;
         else if (result.action === 'completed') results.github.completed++;
         else if (result.action === 'reopened') results.github.reopened++;
+        else if (result.action === 'section_updated') results.github.section_updated++;
       } catch (error) {
         console.error(`Error syncing issue ${issue._repoFullName}#${issue.number}:`, error);
         results.github.errors++;
@@ -915,14 +1302,15 @@ async function performBidirectionalSync(env) {
     const { tasks: todoistTasks, newSyncToken, fullSync } = await pollTodoistChanges(env, state.todoistSyncToken, projectHierarchy);
     console.log(`Found ${todoistTasks.length} Todoist tasks to process (full_sync: ${fullSync})`);
 
-    // Process Todoist -> GitHub sync
+    // Process Todoist -> GitHub sync (with section and milestone caches)
     for (const task of todoistTasks) {
       try {
-        const result = await syncTaskToGitHub(env, task);
+        const result = await syncTaskToGitHub(env, task, sectionIdToName, milestoneCache);
         results.todoist.processed++;
         if (result.action === 'closed') results.todoist.closed++;
         else if (result.action === 'reopened') results.todoist.reopened++;
         else if (result.action === 'created_issue') results.todoist.created_issues++;
+        else if (result.action === 'milestone_updated') results.todoist.milestone_updated++;
       } catch (error) {
         console.error(`Error syncing task ${task.id}:`, error);
         results.todoist.errors++;
@@ -952,8 +1340,9 @@ async function performBidirectionalSync(env) {
 /**
  * Auto-backfill newly detected projects
  * Called during scheduled sync when new Todoist sub-projects are found
+ * Includes milestone-to-section mapping when sectionCache is provided
  */
-async function performAutoBackfill(env, newProjectIds, projectHierarchy, results) {
+async function performAutoBackfill(env, newProjectIds, projectHierarchy, results, sectionCache = null) {
   const { subProjects } = projectHierarchy;
 
   // Get repos to backfill
@@ -997,6 +1386,18 @@ async function performAutoBackfill(env, newProjectIds, projectHierarchy, results
             continue;
           }
 
+          // Determine section from milestone (if available)
+          let sectionId = null;
+          const milestoneName = issue.milestone?.title;
+          if (milestoneName && sectionCache) {
+            try {
+              sectionId = await getOrCreateSection(env, repo.projectId, milestoneName, sectionCache);
+            } catch (error) {
+              console.error(`Failed to get/create section for milestone "${milestoneName}":`, error);
+              // Continue without section
+            }
+          }
+
           // Create task for this issue
           await createTodoistTask(env, {
             title: issue.title,
@@ -1004,10 +1405,12 @@ async function performAutoBackfill(env, newProjectIds, projectHierarchy, results
             repoName: repo.name,
             issueUrl: issue.html_url,
             projectId: repo.projectId,
+            sectionId: sectionId,
           });
 
           results.created++;
-          console.log(`Auto-backfill created task for: ${repo.fullRepo}#${issue.number}`);
+          const sectionInfo = sectionId ? ` (section: ${milestoneName})` : '';
+          console.log(`Auto-backfill created task for: ${repo.fullRepo}#${issue.number}${sectionInfo}`);
         } catch (error) {
           console.error(`Auto-backfill error for ${repo.fullRepo}#${issue.number}:`, error);
           results.errors++;
@@ -1152,7 +1555,7 @@ function jsonResponse(data, status = 200) {
 
 async function createTodoistTask(
   env,
-  { title, issueNumber, repoName, issueUrl, projectId }
+  { title, issueNumber, repoName, issueUrl, projectId, sectionId = null }
 ) {
   if (!projectId) {
     throw new Error('projectId is required - ensure ORG_MAPPINGS is configured');
@@ -1163,6 +1566,11 @@ async function createTodoistTask(
     description: issueUrl,
     project_id: projectId,
   };
+
+  // Add section if milestone-based section is specified
+  if (sectionId) {
+    taskData.section_id = sectionId;
+  }
 
   return withRetry(async () => {
     const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
@@ -1368,9 +1776,17 @@ async function reopenGitHubIssue(env, { owner, repo, issueNumber }) {
 
 /**
  * Create a new GitHub issue
+ * milestone is the milestone number (not title)
  */
-async function createGitHubIssue(env, { owner, repo, title, body }) {
+async function createGitHubIssue(env, { owner, repo, title, body, milestone = null }) {
   return withRetry(async () => {
+    const issueData = { title, body };
+
+    // Add milestone if specified
+    if (milestone !== null) {
+      issueData.milestone = milestone;
+    }
+
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/issues`,
       {
@@ -1381,7 +1797,7 @@ async function createGitHubIssue(env, { owner, repo, title, body }) {
           'User-Agent': 'GitHub-Todoist-Sync-Worker',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ title, body }),
+        body: JSON.stringify(issueData),
       }
     );
 
@@ -1717,8 +2133,9 @@ async function* fetchUserRepos(env, user) {
  * @param {boolean} dryRun - If true, don't actually create tasks
  * @param {string} [projectId] - Optional Todoist project ID for the task
  * @param {Map} [existingTasks] - Pre-fetched map of issueUrl -> taskInfo for batch checking
+ * @param {Map} [sectionCache] - Optional section cache for milestone-to-section mapping
  */
-async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId = null, existingTasks = null) {
+async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId = null, existingTasks = null, sectionCache = null) {
   try {
     // Check existence using pre-fetched map (no API call) or fallback to individual check
     let exists;
@@ -1733,12 +2150,25 @@ async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId 
     }
 
     if (dryRun) {
-      return { status: 'would_create' };
+      const milestone = issue.milestone?.title || null;
+      return { status: 'would_create', milestone };
     }
 
     // For actual task creation, projectId is required (use 'projects' mode)
     if (!projectId) {
       return { status: 'failed', error: 'projectId required - use "projects" mode for task creation' };
+    }
+
+    // Determine section from milestone (if available)
+    let sectionId = null;
+    const milestoneName = issue.milestone?.title;
+    if (milestoneName && sectionCache) {
+      try {
+        sectionId = await getOrCreateSection(env, projectId, milestoneName, sectionCache);
+      } catch (error) {
+        console.error(`Failed to get/create section for milestone "${milestoneName}":`, error);
+        // Continue without section
+      }
     }
 
     const [, repoName] = repoFullName.split('/');
@@ -1748,9 +2178,10 @@ async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId 
       repoName: repoName,
       issueUrl: issue.html_url,
       projectId: projectId,
+      sectionId: sectionId,
     });
 
-    return { status: 'created', taskId: task.id };
+    return { status: 'created', taskId: task.id, section: milestoneName || null };
   } catch (error) {
     console.error(`Failed to process issue ${repoFullName}#${issue.number}:`, error);
     return { status: 'failed', error: error.message };
@@ -1801,6 +2232,7 @@ async function handleBackfill(request, env, _ctx) {
       // Get list of repos to process (with optional projectId for task creation)
       let repos;
       let existingTasks = null; // Pre-fetched tasks for batch existence checking
+      let sectionCache = null; // Section cache for milestone-to-section mapping
 
       if (mode === 'single-repo') {
         repos = [{ owner, name: repo, projectId: null }];
@@ -1820,12 +2252,17 @@ async function handleBackfill(request, env, _ctx) {
         const projectIds = repos.map((r) => r.projectId);
         existingTasks = await fetchExistingTasksForProjects(env, projectIds);
 
+        // Pre-fetch sections for milestone-to-section mapping
+        const sectionResult = await fetchSectionsForProjects(env, projectIds);
+        sectionCache = sectionResult.sectionCache;
+
         await writeJSON({
           type: 'config',
           mode: 'projects',
           orgs: Array.from(orgMappings.values()),
           repos: repos.map((r) => `${r.owner}/${r.name}`),
           existingTaskCount: existingTasks.size,
+          sectionCount: Array.from(sectionCache.values()).reduce((sum, m) => sum + m.size, 0),
         });
       } else {
         // mode === 'org': Collect repos from async generator
@@ -1861,7 +2298,8 @@ async function handleBackfill(request, env, _ctx) {
               repoFullName,
               dryRun,
               repoInfo.projectId,
-              existingTasks // Pass pre-fetched tasks for batch checking
+              existingTasks, // Pass pre-fetched tasks for batch checking
+              sectionCache // Pass section cache for milestone-to-section mapping
             );
 
             summary.total++;
