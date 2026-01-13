@@ -163,11 +163,11 @@ GitHub Repo: my-org/api
 
 Todoist Sub-Project: api
 ├── Section: v1.0
-│   └── [api#1] Fix bug
+│   └── [#1] Fix bug
 ├── Section: v2.0
-│   └── [api#2] Add feature
+│   └── [#2] Add feature
 └── (no section)
-    └── [api#3] Update docs
+    └── [#3] Update docs
 ```
 
 **Notes:**

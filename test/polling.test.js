@@ -316,7 +316,7 @@ describe('Todoist Task to GitHub Issue Creation', () => {
           {
             id: 'task-existing',
             project_id: TEST_SUB_PROJECT_ID,
-            content: '[test-repo#1] Existing task',
+            content: '[#1] Existing task',
             description: 'https://github.com/test-org/test-repo/issues/1',
             is_completed: false,
           },
@@ -489,7 +489,7 @@ describe('Task Completion Sync', () => {
           {
             id: 'task-123',
             project_id: TEST_SUB_PROJECT_ID,
-            content: '[test-repo#1] Task',
+            content: '[#1] Task',
             description: 'https://github.com/test-org/test-repo/issues/1',
             is_completed: true,
             checked: 1,

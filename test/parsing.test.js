@@ -52,13 +52,15 @@ function getRepoFromLabels(labels) {
 }
 
 /**
- * Strip the [repo#issue] prefix from Todoist task content
+ * Strip the [#issue] prefix from Todoist task content
  * Duplicated from worker.js for testing
+ * Also handles legacy [repo-name#123] or [owner/repo#123] format for backwards compatibility
  */
 function stripTodoistPrefix(content) {
   if (!content) return content;
-  // Match: [repo-name#123] or [owner/repo#123] at the start
-  return content.replace(/^\[[\w./-]+#\d+\]\s*/, '');
+  // Match: [#123] at the start (new format)
+  // Also matches legacy [repo-name#123] or [owner/repo#123] for backwards compatibility
+  return content.replace(/^\[[\w./-]*#\d+\]\s*/, '');
 }
 
 describe('parseGitHubUrl', () => {
@@ -206,39 +208,52 @@ describe('getRepoFromLabels', () => {
 });
 
 describe('stripTodoistPrefix', () => {
-  it('strips simple repo#issue prefix', () => {
+  // New format tests [#N]
+  it('strips new [#N] prefix format', () => {
+    const result = stripTodoistPrefix('[#123] Fix the bug');
+    expect(result).toBe('Fix the bug');
+  });
+
+  it('strips new format with multi-digit issue numbers', () => {
+    const result = stripTodoistPrefix('[#12345] Large issue number');
+    expect(result).toBe('Large issue number');
+  });
+
+  it('strips new format without trailing space', () => {
+    const result = stripTodoistPrefix('[#1]No space after');
+    expect(result).toBe('No space after');
+  });
+
+  it('strips new format with multiple spaces', () => {
+    const result = stripTodoistPrefix('[#1]   Multiple spaces');
+    expect(result).toBe('Multiple spaces');
+  });
+
+  // Legacy format tests (backwards compatibility)
+  it('strips legacy repo#issue prefix', () => {
     const result = stripTodoistPrefix('[my-repo#123] Fix the bug');
     expect(result).toBe('Fix the bug');
   });
 
-  it('strips owner/repo#issue prefix', () => {
+  it('strips legacy owner/repo#issue prefix', () => {
     const result = stripTodoistPrefix('[my-org/my-repo#456] Add feature');
     expect(result).toBe('Add feature');
   });
 
-  it('strips prefix with underscores and dots', () => {
+  it('strips legacy prefix with underscores and dots', () => {
     const result = stripTodoistPrefix('[my_org.io/repo.js#789] Update docs');
     expect(result).toBe('Update docs');
   });
 
-  it('handles multi-digit issue numbers', () => {
-    const result = stripTodoistPrefix('[repo#12345] Large issue number');
-    expect(result).toBe('Large issue number');
-  });
-
-  it('returns original content if no prefix', () => {
-    const result = stripTodoistPrefix('Just a regular task');
-    expect(result).toBe('Just a regular task');
-  });
-
-  it('handles prefix without trailing space', () => {
+  it('strips legacy format without trailing space', () => {
     const result = stripTodoistPrefix('[repo#1]No space after');
     expect(result).toBe('No space after');
   });
 
-  it('handles prefix with multiple spaces (strips all trailing whitespace)', () => {
-    const result = stripTodoistPrefix('[repo#1]   Multiple spaces');
-    expect(result).toBe('Multiple spaces');
+  // Edge cases
+  it('returns original content if no prefix', () => {
+    const result = stripTodoistPrefix('Just a regular task');
+    expect(result).toBe('Just a regular task');
   });
 
   it('returns null for null input', () => {
@@ -254,6 +269,11 @@ describe('stripTodoistPrefix', () => {
   });
 
   it('does not strip prefix in middle of string', () => {
+    const result = stripTodoistPrefix('See [#123] for details');
+    expect(result).toBe('See [#123] for details');
+  });
+
+  it('does not strip legacy prefix in middle of string', () => {
     const result = stripTodoistPrefix('See [repo#123] for details');
     expect(result).toBe('See [repo#123] for details');
   });

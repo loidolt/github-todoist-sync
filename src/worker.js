@@ -978,7 +978,6 @@ async function syncIssueToTodoist(env, issue, sectionCache = null) {
       await createTodoistTask(env, {
         title: issue.title,
         issueNumber: issue.number,
-        repoName: repoName,
         issueUrl: issueUrl,
         projectId: projectId,
         sectionId: targetSectionId,
@@ -1004,7 +1003,7 @@ async function syncIssueToTodoist(env, issue, sectionCache = null) {
   }
 
   // Check for title changes
-  const expectedTitle = `[${repoName}#${issue.number}] ${issue.title}`;
+  const expectedTitle = `[#${issue.number}] ${issue.title}`;
   let updated = false;
 
   if (task.content !== expectedTitle) {
@@ -1140,19 +1139,25 @@ async function syncTaskToGitHub(env, task, sectionIdToName = null, milestoneCach
   }
 
   // Create GitHub issue for this task
+  // Strip any existing prefix from the task content before using as issue title
+  const issueTitle = stripTodoistPrefix(task.content);
   const milestoneInfo = milestoneNumber ? ` with milestone "${milestoneName}"` : '';
-  console.log(`Creating GitHub issue for task: ${task._fullRepo} - ${task.content}${milestoneInfo}`);
+  console.log(`Creating GitHub issue for task: ${task._fullRepo} - ${issueTitle}${milestoneInfo}`);
   try {
     const issue = await createGitHubIssue(env, {
       owner: task._githubOrg,
       repo: task._repoName,
-      title: task.content,
+      title: issueTitle,
       body: task.description || `Created from Todoist task: ${task.id}`,
       milestone: milestoneNumber,
     });
 
-    // Update task description with GitHub URL (for bidirectional sync)
-    await updateTodoistTaskDescription(env, task.id, issue.html_url);
+    // Update task with GitHub URL and add issue number prefix
+    const newTaskContent = `[#${issue.number}] ${issueTitle}`;
+    await updateTodoistTask(env, task.id, {
+      content: newTaskContent,
+      description: issue.html_url,
+    });
     console.log(`Created GitHub issue: ${issue.html_url}`);
 
     return { action: 'created_issue', issue: issue.html_url, taskId: task.id, milestone: milestoneName };
@@ -1402,7 +1407,6 @@ async function performAutoBackfill(env, newProjectIds, projectHierarchy, results
           await createTodoistTask(env, {
             title: issue.title,
             issueNumber: issue.number,
-            repoName: repo.name,
             issueUrl: issue.html_url,
             projectId: repo.projectId,
             sectionId: sectionId,
@@ -1555,14 +1559,14 @@ function jsonResponse(data, status = 200) {
 
 async function createTodoistTask(
   env,
-  { title, issueNumber, repoName, issueUrl, projectId, sectionId = null }
+  { title, issueNumber, issueUrl, projectId, sectionId = null }
 ) {
   if (!projectId) {
     throw new Error('projectId is required - ensure ORG_MAPPINGS is configured');
   }
 
   const taskData = {
-    content: `[${repoName}#${issueNumber}] ${title}`,
+    content: `[#${issueNumber}] ${title}`,
     description: issueUrl,
     project_id: projectId,
   };
@@ -1699,6 +1703,17 @@ async function reopenTodoistTask(env, taskId) {
 // GitHub URL Parsing and API Functions
 // =============================================================================
 
+/**
+ * Strip the [#issue] prefix from Todoist task content
+ * Used when creating GitHub issues from Todoist tasks
+ */
+function stripTodoistPrefix(content) {
+  if (!content) return content;
+  // Match: [#123] at the start (new format)
+  // Also matches legacy [repo-name#123] or [owner/repo#123] for backwards compatibility
+  return content.replace(/^\[[\w./-]*#\d+\]\s*/, '');
+}
+
 function parseGitHubUrl(description) {
   if (!description) return null;
 
@@ -1807,30 +1822,6 @@ async function createGitHubIssue(env, { owner, repo, title, body, milestone = nu
     }
 
     return response.json();
-  });
-}
-
-/**
- * Update a Todoist task's description
- */
-async function updateTodoistTaskDescription(env, taskId, description) {
-  return withRetry(async () => {
-    const response = await fetch(
-      `https://api.todoist.com/rest/v2/tasks/${taskId}`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ description }),
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
-    }
   });
 }
 
@@ -2171,11 +2162,9 @@ async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId 
       }
     }
 
-    const [, repoName] = repoFullName.split('/');
     const task = await createTodoistTask(env, {
       title: issue.title,
       issueNumber: issue.number,
-      repoName: repoName,
       issueUrl: issue.html_url,
       projectId: projectId,
       sectionId: sectionId,

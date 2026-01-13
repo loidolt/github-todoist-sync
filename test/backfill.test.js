@@ -271,7 +271,7 @@ describe('Backfill Single Repo', () => {
       .reply(200, [
         {
           id: 'existing-task',
-          content: '[skip-test-repo#1] Test Issue 1',
+          content: '[#1] Test Issue 1',
           description: 'https://github.com/test-org/skip-test-repo/issues/1',
         },
       ]);
@@ -673,7 +673,7 @@ describe('Backfill Projects Mode', () => {
     fetchMock
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/rest/v2/tasks' })
-      .reply(201, { id: 'created-subproj-task', content: '[sub-proj-repo#99] Subproject Test Issue' });
+      .reply(201, { id: 'created-subproj-task', content: '[#99] Subproject Test Issue' });
 
     const request = createBackfillRequest({
       mode: 'projects',
@@ -721,7 +721,7 @@ describe('Backfill Projects Mode', () => {
           {
             id: 'existing-batch-task-1',
             project_id: '1001',
-            content: '[batch-test-repo#1] Existing Issue',
+            content: '[#1] Existing Issue',
             description: 'https://github.com/test-org/batch-test-repo/issues/1',
           },
         ],

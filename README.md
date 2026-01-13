@@ -238,7 +238,7 @@ OpenAPI 3.0 specification.
 Tasks created in Todoist follow this format:
 
 ```
-[repo-name#123] Issue title here
+[#123] Issue title here
 ```
 
 The task description contains the full GitHub issue URL:
@@ -248,9 +248,11 @@ https://github.com/owner/repo/issues/123
 ```
 
 This format enables:
-- Quick identification of the source repository
+- Quick identification of the issue number (repo is determined by the project)
 - Direct linking to the GitHub issue
 - Bidirectional sync through URL matching
+
+When you create a task in Todoist without a prefix and it syncs to GitHub, the prefix is automatically added after the GitHub issue is created.
 
 ## Development
 
