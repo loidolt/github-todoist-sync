@@ -40,11 +40,14 @@ npx wrangler secret put GITHUB_ORG  # Optional: for Todoist→GitHub sync (e.g.,
 
 ## Architecture
 
-Single-file worker (`src/worker.js`) with four HTTP routes:
+Single-file worker (`src/worker.js`) with the following HTTP routes:
 - `POST /github-webhook` - Receives GitHub issue events, creates/completes/updates Todoist tasks
 - `POST /todoist-webhook` - Receives Todoist events, creates/closes/updates GitHub issues
 - `POST /backfill` - Backfill existing GitHub issues to Todoist (requires Bearer auth)
 - `GET /health` - Health check endpoint
+- `GET /api-docs` - Swagger UI documentation interface
+- `GET /openapi.json` - OpenAPI 3.0 specification
+- `GET /` - Redirects to `/api-docs`
 
 ### Key Flows
 

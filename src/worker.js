@@ -6,7 +6,292 @@
  *   POST /todoist-webhook  - Receives Todoist completion events, closes GitHub issues
  *   POST /backfill         - Backfill existing GitHub issues to Todoist
  *   GET  /health           - Health check endpoint
+ *   GET  /api-docs         - Swagger UI documentation
+ *   GET  /openapi.json     - OpenAPI specification
  */
+
+// =============================================================================
+// OpenAPI Specification
+// =============================================================================
+
+function getOpenApiSpec(baseUrl) {
+  return {
+    openapi: '3.0.3',
+    info: {
+      title: 'GitHub ↔ Todoist Sync API',
+      description: 'Bidirectional sync between GitHub issues and Todoist tasks',
+      version: '1.0.0',
+    },
+    servers: [{ url: baseUrl }],
+    paths: {
+      '/health': {
+        get: {
+          summary: 'Health check',
+          description: 'Returns the health status of the service',
+          tags: ['Health'],
+          responses: {
+            200: {
+              description: 'Service is healthy',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      status: { type: 'string', example: 'ok' },
+                      timestamp: { type: 'string', format: 'date-time' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/github-webhook': {
+        post: {
+          summary: 'GitHub webhook endpoint',
+          description: 'Receives GitHub issue events and syncs them to Todoist tasks. Handles: opened, closed, edited, reopened actions.',
+          tags: ['Webhooks'],
+          parameters: [
+            {
+              name: 'X-GitHub-Event',
+              in: 'header',
+              required: true,
+              schema: { type: 'string', example: 'issues' },
+              description: 'GitHub event type',
+            },
+            {
+              name: 'X-Hub-Signature-256',
+              in: 'header',
+              required: true,
+              schema: { type: 'string' },
+              description: 'HMAC-SHA256 signature (sha256=...)',
+            },
+            {
+              name: 'X-GitHub-Delivery',
+              in: 'header',
+              required: true,
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Unique delivery ID for idempotency',
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  description: 'GitHub webhook payload',
+                },
+              },
+            },
+          },
+          responses: {
+            200: { description: 'Event processed or ignored' },
+            201: { description: 'Task created in Todoist' },
+            401: { description: 'Invalid signature' },
+            500: { description: 'Server error' },
+          },
+        },
+      },
+      '/todoist-webhook': {
+        post: {
+          summary: 'Todoist webhook endpoint',
+          description: 'Receives Todoist events and syncs them to GitHub issues. Handles: item:added, item:completed, item:updated, item:uncompleted events.',
+          tags: ['Webhooks'],
+          parameters: [
+            {
+              name: 'X-Todoist-Hmac-SHA256',
+              in: 'header',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Base64-encoded HMAC-SHA256 signature',
+            },
+            {
+              name: 'X-Todoist-Delivery-ID',
+              in: 'header',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Unique delivery ID for idempotency',
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  description: 'Todoist webhook payload',
+                },
+              },
+            },
+          },
+          responses: {
+            200: { description: 'Event processed or ignored' },
+            201: { description: 'Issue created in GitHub' },
+            401: { description: 'Invalid signature' },
+            500: { description: 'Server error' },
+          },
+        },
+      },
+      '/backfill': {
+        post: {
+          summary: 'Backfill existing GitHub issues to Todoist',
+          description: 'Syncs existing GitHub issues to Todoist tasks. Supports single repo or entire org mode. Returns streaming NDJSON response with real-time progress.',
+          tags: ['Backfill'],
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['mode'],
+                  properties: {
+                    mode: {
+                      type: 'string',
+                      enum: ['single-repo', 'org'],
+                      description: 'Backfill mode',
+                    },
+                    repo: {
+                      type: 'string',
+                      description: 'Repository name (required for single-repo mode)',
+                      example: 'my-repo',
+                    },
+                    owner: {
+                      type: 'string',
+                      description: 'GitHub owner/org (defaults to GITHUB_ORG env var)',
+                      example: 'my-org',
+                    },
+                    state: {
+                      type: 'string',
+                      enum: ['open', 'closed', 'all'],
+                      default: 'open',
+                      description: 'Issue state filter',
+                    },
+                    dryRun: {
+                      type: 'boolean',
+                      default: false,
+                      description: 'Preview mode - no tasks will be created',
+                    },
+                    limit: {
+                      type: 'integer',
+                      minimum: 1,
+                      description: 'Maximum number of issues to process',
+                    },
+                  },
+                },
+                examples: {
+                  'single-repo-dry-run': {
+                    summary: 'Dry run for single repo',
+                    value: {
+                      mode: 'single-repo',
+                      repo: 'my-repo',
+                      dryRun: true,
+                    },
+                  },
+                  'single-repo': {
+                    summary: 'Backfill single repo',
+                    value: {
+                      mode: 'single-repo',
+                      repo: 'my-repo',
+                    },
+                  },
+                  'org': {
+                    summary: 'Backfill entire org',
+                    value: {
+                      mode: 'org',
+                      state: 'open',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'Streaming NDJSON response with progress',
+              content: {
+                'application/x-ndjson': {
+                  schema: {
+                    type: 'object',
+                    description: 'One of: start, issue, repo_complete, complete, error',
+                  },
+                  examples: {
+                    'start': {
+                      summary: 'Start event',
+                      value: { type: 'start', totalRepos: 1, dryRun: true },
+                    },
+                    'issue': {
+                      summary: 'Issue processed',
+                      value: { type: 'issue', repo: 'owner/repo', issue: 1, title: 'Fix bug', status: 'would_create' },
+                    },
+                    'complete': {
+                      summary: 'Backfill complete',
+                      value: { type: 'complete', summary: { total: 10, created: 8, skipped: 2, failed: 0 } },
+                    },
+                  },
+                },
+              },
+            },
+            400: { description: 'Invalid request' },
+            401: { description: 'Unauthorized' },
+          },
+        },
+      },
+    },
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          description: 'Bearer token (BACKFILL_SECRET or GITHUB_WEBHOOK_SECRET)',
+        },
+      },
+    },
+    tags: [
+      { name: 'Health', description: 'Service health endpoints' },
+      { name: 'Webhooks', description: 'Webhook endpoints for GitHub and Todoist' },
+      { name: 'Backfill', description: 'Backfill existing issues to Todoist' },
+    ],
+  };
+}
+
+/**
+ * Generate Swagger UI HTML page
+ */
+function getSwaggerUiHtml(baseUrl) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub-Todoist Sync API</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css">
+  <style>
+    body { margin: 0; }
+    .swagger-ui .topbar { display: none; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
+  <script>
+    window.onload = () => {
+      SwaggerUIBundle({
+        url: '${baseUrl}/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: 'BaseLayout',
+        defaultModelsExpandDepth: -1,
+        tryItOutEnabled: true
+      });
+    };
+  </script>
+</body>
+</html>`;
+}
 
 // =============================================================================
 // Utility Functions
@@ -79,6 +364,7 @@ async function withRetry(fn, options = {}) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const baseUrl = `${url.protocol}//${url.host}`;
 
     // Route requests
     if (request.method === 'POST' && url.pathname === '/github-webhook') {
@@ -100,6 +386,28 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         }
       );
+    }
+
+    // Swagger UI
+    if (request.method === 'GET' && (url.pathname === '/api-docs' || url.pathname === '/api-docs/')) {
+      return new Response(getSwaggerUiHtml(baseUrl), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    // OpenAPI spec
+    if (request.method === 'GET' && url.pathname === '/openapi.json') {
+      return new Response(JSON.stringify(getOpenApiSpec(baseUrl), null, 2), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+
+    // Redirect root to API docs
+    if (request.method === 'GET' && url.pathname === '/') {
+      return Response.redirect(`${baseUrl}/api-docs`, 302);
     }
 
     return new Response('Not Found', { status: 404 });
