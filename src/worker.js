@@ -862,17 +862,32 @@ async function performBidirectionalSync(env) {
     // Only auto-backfill if we have known projects (skip on first sync to avoid backfilling everything)
     const currentProjectIds = Array.from(projectHierarchy.subProjects.keys());
     const knownProjectIds = new Set(state.knownProjectIds || []);
-    const isFirstSync = state.knownProjectIds === undefined || state.knownProjectIds.length === 0;
+    const hasKnownProjects = state.knownProjectIds !== undefined && state.knownProjectIds.length > 0;
     const newProjectIds = currentProjectIds.filter((id) => !knownProjectIds.has(id));
 
-    if (newProjectIds.length > 0 && !isFirstSync) {
+    if (newProjectIds.length > 0 && hasKnownProjects) {
+      // We have a baseline and detected new projects - auto-backfill them
       console.log(`Detected ${newProjectIds.length} new project(s) for auto-backfill:`, newProjectIds);
       results.autoBackfill.newProjects = newProjectIds.length;
 
-      // Auto-backfill new projects
       await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill);
-    } else if (isFirstSync) {
-      console.log(`First sync - recording ${currentProjectIds.length} project(s), skipping auto-backfill`);
+    } else if (!hasKnownProjects) {
+      // No baseline yet - record current projects without backfilling
+      if (state.pollCount > 0) {
+        // Migration: previous syncs existed but didn't track projects (older code version)
+        console.log(
+          `Recording ${currentProjectIds.length} existing project(s) as baseline (migrating from older sync state). ` +
+            `Future new projects will be auto-backfilled. To backfill existing repos now, use POST /backfill`
+        );
+      } else {
+        // True first sync
+        console.log(
+          `First sync: recording ${currentProjectIds.length} project(s) as baseline. ` +
+            `Future new projects will be auto-backfilled. To backfill existing repos, use POST /backfill`
+        );
+      }
+    } else if (newProjectIds.length === 0) {
+      console.log(`No new projects detected (tracking ${knownProjectIds.size} project(s))`);
     }
 
     // Poll GitHub for changes
