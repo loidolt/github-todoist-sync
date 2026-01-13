@@ -1,0 +1,18 @@
+{
+  "name": "github-todoist-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker that syncs GitHub issues to Todoist tasks",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0",
+    "vitest": "~3.2.0",
+    "@cloudflare/vitest-pool-workers": "^0.10.0"
+  }
+}

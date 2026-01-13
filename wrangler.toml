@@ -1,0 +1,21 @@
+name = "github-todoist-sync"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+
+# KV namespace for webhook idempotency (prevents duplicate processing)
+# Create with: npx wrangler kv:namespace create "WEBHOOK_CACHE"
+# Then replace the id below with the output
+[[kv_namespaces]]
+binding = "WEBHOOK_CACHE"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# Secrets are added via `wrangler secret put <NAME>`
+# Required secrets:
+# - GITHUB_WEBHOOK_SECRET
+# - GITHUB_TOKEN
+# - TODOIST_API_TOKEN
+# - TODOIST_WEBHOOK_SECRET
+# - TODOIST_PROJECT_ID
+#
+# Optional (for Todoist -> GitHub sync):
+# - GITHUB_ORG  (e.g., "your-username" or "your-org")
