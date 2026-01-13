@@ -1025,6 +1025,71 @@ async function pollTodoistChanges(env, syncToken, projectHierarchy) {
   };
 }
 
+/**
+ * Poll Todoist for completed tasks using the /completed/get_all endpoint
+ * This is needed because the Sync API does not return completed items
+ *
+ * @param {Object} env - Environment with TODOIST_API_TOKEN
+ * @param {string|null} since - ISO timestamp to get tasks completed after this time
+ * @param {Object} projectHierarchy - Project hierarchy with subProjects map
+ * @returns {Array} - Array of completed tasks with GitHub URLs
+ */
+async function pollCompletedTasks(env, since, projectHierarchy) {
+  const params = new URLSearchParams({
+    annotate_items: 'true', // Get full item objects including description
+    limit: '200', // Max allowed
+  });
+
+  // If we have a since timestamp, filter to tasks completed after that time
+  if (since) {
+    // Format: 2021-4-29T10:13:00 (without timezone)
+    const sinceDate = new Date(since);
+    const formattedSince = sinceDate.toISOString().replace('Z', '').split('.')[0];
+    params.set('since', formattedSince);
+  }
+
+  const response = await fetch(`https://api.todoist.com/sync/v9/completed/get_all?${params}`, {
+    headers: {
+      Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Todoist completed/get_all API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  const { subProjects } = projectHierarchy;
+
+  // Filter to only tasks from sub-projects we're tracking
+  // The response includes task_id and project_id at the top level
+  // With annotate_items=true, full item data is in the 'item' property
+  const completedTasks = (data.items || []).filter((item) => {
+    const projectId = String(item.project_id);
+    return subProjects.has(projectId);
+  });
+
+  // Enrich with repo info and extract the description from annotated item
+  const enrichedTasks = completedTasks.map((completedItem) => {
+    const projectId = String(completedItem.project_id);
+    const subProject = subProjects.get(projectId);
+
+    return {
+      id: completedItem.task_id,
+      content: completedItem.content,
+      description: completedItem.item?.description || '',
+      project_id: completedItem.project_id,
+      completed_at: completedItem.completed_at,
+      _githubOrg: subProject?.githubOrg,
+      _repoName: subProject?.repoName,
+      _fullRepo: subProject?.fullRepo,
+    };
+  });
+
+  return enrichedTasks;
+}
+
 // =============================================================================
 // Reconciliation Logic
 // =============================================================================
@@ -1421,11 +1486,44 @@ async function performBidirectionalSync(env) {
       }
     }
 
+    // Poll for completed tasks (Sync API doesn't return completed items)
+    console.log(`Polling Todoist for completed tasks since: ${state.lastCompletedSync || 'beginning'}`);
+    const completedTasks = await pollCompletedTasks(env, state.lastCompletedSync, projectHierarchy);
+    console.log(`Found ${completedTasks.length} completed tasks to process`);
+
+    // Process completed tasks - close corresponding GitHub issues
+    for (const completedTask of completedTasks) {
+      try {
+        const githubInfo = parseGitHubUrl(completedTask.description);
+        if (!githubInfo) {
+          // Task doesn't have a GitHub URL - it was created in Todoist, nothing to close
+          continue;
+        }
+
+        // Check if the GitHub issue is still open
+        const issue = await getGitHubIssue(env, githubInfo);
+        if (!issue) {
+          console.warn(`GitHub issue not found for completed task: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
+          continue;
+        }
+
+        if (issue.state === 'open') {
+          console.log(`Closing issue for completed task: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
+          await closeGitHubIssue(env, githubInfo);
+          results.todoist.closed++;
+        }
+      } catch (error) {
+        console.error(`Error processing completed task ${completedTask.id}:`, error);
+        results.todoist.errors++;
+      }
+    }
+
     // Save updated sync state (including all known project IDs)
     // Preserve incomplete backfill projects for next sync cycle
     const hasIncompleteBackfill = incompleteBackfillProjects.length > 0;
     const newState = {
       lastGitHubSync: new Date().toISOString(),
+      lastCompletedSync: new Date().toISOString(), // Track when we last checked completed tasks
       todoistSyncToken: newSyncToken,
       lastPollTime: new Date().toISOString(),
       pollCount: state.pollCount + 1,

@@ -37,6 +37,14 @@ function mockTodoistProjects(fetchMock, projects) {
     .reply(200, { projects, sync_token: 'projects-token' });
 }
 
+// Helper to mock Todoist completed tasks endpoint (required for completed task sync)
+function mockTodoistCompletedTasks(fetchMock, completedItems = []) {
+  fetchMock
+    .get('https://api.todoist.com')
+    .intercept({ path: /\/sync\/v9\/completed\/get_all/ })
+    .reply(200, { items: completedItems });
+}
+
 // Default project hierarchy for tests
 const DEFAULT_PROJECTS = [
   { id: TEST_PARENT_PROJECT_ID, name: 'Test Org Issues', parent_id: null },
@@ -137,6 +145,9 @@ describe('Scheduled Handler with Project Hierarchy', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -188,6 +199,9 @@ describe('Scheduled Handler with Project Hierarchy', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
 
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
@@ -277,6 +291,9 @@ describe('Todoist Task to GitHub Issue Creation', () => {
       .intercept({ method: 'POST', path: /\/rest\/v2\/tasks\/task-new/ })
       .reply(200, {});
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -324,6 +341,9 @@ describe('Todoist Task to GitHub Issue Creation', () => {
         sync_token: 'items-token',
         full_sync: false,
       });
+
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
 
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
@@ -384,6 +404,9 @@ describe('GitHub Issue to Todoist Task in Sub-Project', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -436,6 +459,9 @@ describe('Multiple Organizations', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -468,7 +494,7 @@ describe('Task Completion Sync', () => {
       .intercept({ path: /\/repos\/test-org\/test-repo\/issues\?/ })
       .reply(200, []);
 
-    // Mock GitHub issue GET
+    // Mock GitHub issue GET (called when checking if issue should be closed)
     fetchMock
       .get('https://api.github.com')
       .intercept({ path: '/repos/test-org/test-repo/issues/1' })
@@ -480,23 +506,33 @@ describe('Task Completion Sync', () => {
       .intercept({ method: 'PATCH', path: '/repos/test-org/test-repo/issues/1' })
       .reply(200, { number: 1, state: 'closed' });
 
-    // Mock Todoist items sync - completed task
+    // Mock Todoist items sync - empty because completed items are NOT returned by Sync API
     fetchMock
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, {
-        items: [
-          {
-            id: 'task-123',
-            project_id: TEST_SUB_PROJECT_ID,
-            content: '[#1] Task',
-            description: 'https://github.com/test-org/test-repo/issues/1',
-            is_completed: true,
-            checked: 1,
-          },
-        ],
+        items: [],
         sync_token: 'items-token',
         full_sync: false,
+      });
+
+    // Mock Todoist completed/get_all endpoint - this is where completed tasks come from
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: /\/sync\/v9\/completed\/get_all/ })
+      .reply(200, {
+        items: [
+          {
+            task_id: 'task-123',
+            project_id: TEST_SUB_PROJECT_ID,
+            content: '[#1] Task',
+            completed_at: '2024-01-15T10:30:00Z',
+            item: {
+              id: 'task-123',
+              description: 'https://github.com/test-org/test-repo/issues/1',
+            },
+          },
+        ],
       });
 
     const ctx = createExecutionContext();
@@ -505,6 +541,7 @@ describe('Task Completion Sync', () => {
 
     const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
     expect(state.pollCount).toBe(1);
+    expect(state.lastCompletedSync).toBeDefined();
   });
 });
 
@@ -536,6 +573,9 @@ describe('Auto-Backfill for New Projects', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
 
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
@@ -612,6 +652,9 @@ describe('Auto-Backfill for New Projects', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -659,6 +702,9 @@ describe('Auto-Backfill for New Projects', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
 
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
@@ -723,6 +769,9 @@ describe('Milestone to Section Sync', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -777,6 +826,9 @@ describe('Milestone to Section Sync', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
 
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
@@ -1008,6 +1060,9 @@ describe('Forced Backfill After Reset', () => {
       .intercept({ method: 'POST', path: '/sync/v9/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -1087,6 +1142,9 @@ describe('Section to Milestone Sync', () => {
       .intercept({ method: 'POST', path: /\/rest\/v2\/tasks\/task-in-section/ })
       .reply(200, {});
 
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
+
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
@@ -1148,6 +1206,9 @@ describe('Section to Milestone Sync', () => {
       .get('https://api.todoist.com')
       .intercept({ method: 'POST', path: /\/rest\/v2\/tasks\/task-no-section/ })
       .reply(200, {});
+
+    // Mock Todoist completed tasks endpoint
+    mockTodoistCompletedTasks(fetchMock);
 
     const ctx = createExecutionContext();
     await worker.scheduled({}, env, ctx);
