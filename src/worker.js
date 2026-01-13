@@ -38,6 +38,13 @@ const CONSTANTS = {
   // API endpoints
   TODOIST_API_BASE: 'https://api.todoist.com',
   GITHUB_API_BASE: 'https://api.github.com',
+
+  // Batch operation limits (to stay within Cloudflare subrequest limits)
+  // Cloudflare free tier: 50 subrequests, paid: 1000
+  // We use conservative limits to leave room for other operations
+  BATCH_TASK_LIMIT: 50, // Max tasks to batch in one Sync API call
+  MAX_TASKS_PER_SYNC: 30, // Max tasks to create per sync cycle
+  MAX_SECTIONS_PER_SYNC: 10, // Max sections to create per sync cycle
 };
 
 // =============================================================================
@@ -1339,18 +1346,21 @@ async function performBidirectionalSync(env) {
     const forceBackfill = state.forceBackfillNextSync === true;
     const forceBackfillProjectIds = state.forceBackfillProjectIds || [];
 
+    // Track projects that still need backfilling (for progressive backfill)
+    let incompleteBackfillProjects = [];
+
     if (forceBackfill && forceBackfillProjectIds.length > 0) {
       // Forced backfill from POST /reset-projects
       console.log(`Forced backfill triggered for ${forceBackfillProjectIds.length} project(s):`, forceBackfillProjectIds);
       results.autoBackfill.newProjects = forceBackfillProjectIds.length;
 
-      await performAutoBackfill(env, forceBackfillProjectIds, projectHierarchy, results.autoBackfill, sectionCache);
+      incompleteBackfillProjects = await performAutoBackfill(env, forceBackfillProjectIds, projectHierarchy, results.autoBackfill, sectionCache) || [];
     } else if (newProjectIds.length > 0 && hasKnownProjects) {
       // We have a baseline and detected new projects - auto-backfill them
       console.log(`Detected ${newProjectIds.length} new project(s) for auto-backfill:`, newProjectIds);
       results.autoBackfill.newProjects = newProjectIds.length;
 
-      await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill, sectionCache);
+      incompleteBackfillProjects = await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill, sectionCache) || [];
     } else if (!hasKnownProjects && !forceBackfill) {
       // No baseline yet - record current projects without backfilling
       if (state.pollCount > 0) {
@@ -1412,17 +1422,23 @@ async function performBidirectionalSync(env) {
     }
 
     // Save updated sync state (including all known project IDs)
-    // Clear force backfill flags after sync completes
+    // Preserve incomplete backfill projects for next sync cycle
+    const hasIncompleteBackfill = incompleteBackfillProjects.length > 0;
     const newState = {
       lastGitHubSync: new Date().toISOString(),
       todoistSyncToken: newSyncToken,
       lastPollTime: new Date().toISOString(),
       pollCount: state.pollCount + 1,
       knownProjectIds: currentProjectIds, // Track all current projects
-      forceBackfillNextSync: false, // Clear force flag
-      forceBackfillProjectIds: [], // Clear force project list
+      // Keep force backfill flags if there are incomplete projects
+      forceBackfillNextSync: hasIncompleteBackfill,
+      forceBackfillProjectIds: incompleteBackfillProjects,
     };
     await saveSyncState(env, newState);
+
+    if (hasIncompleteBackfill) {
+      console.log(`${incompleteBackfillProjects.length} project(s) will continue backfilling on next sync`);
+    }
 
     const duration = Date.now() - startTime;
     console.log(`Sync completed in ${duration}ms:`, JSON.stringify(results));
@@ -1438,6 +1454,15 @@ async function performBidirectionalSync(env) {
  * Auto-backfill newly detected projects
  * Called during scheduled sync when new Todoist sub-projects are found
  * Includes milestone-to-section mapping when sectionCache is provided
+ *
+ * Uses batched API calls to minimize subrequest count:
+ * 1. Fetch all issues first (GitHub API calls are unavoidable per-repo)
+ * 2. Batch create all needed sections in one Sync API call
+ * 3. Batch create all tasks in one Sync API call
+ *
+ * Respects MAX_TASKS_PER_SYNC limit to prevent hitting Cloudflare limits
+ *
+ * @returns {Array} - List of project IDs that still need more backfilling (hit the limit)
  */
 async function performAutoBackfill(env, newProjectIds, projectHierarchy, results, sectionCache = null) {
   const { subProjects } = projectHierarchy;
@@ -1457,68 +1482,172 @@ async function performAutoBackfill(env, newProjectIds, projectHierarchy, results
 
   if (reposToBackfill.length === 0) {
     console.log('No new repos to backfill');
-    return;
+    return [];
   }
 
   console.log(`Auto-backfilling ${reposToBackfill.length} new repo(s):`, reposToBackfill.map((r) => r.fullRepo));
 
-  // Pre-fetch existing tasks for the new projects (batch operation)
+  // Pre-fetch existing tasks for the new projects (batch operation - 1 API call)
   const existingTasks = await fetchExistingTasksForProjects(
     env,
     reposToBackfill.map((r) => r.projectId)
   );
 
+  console.log(`Found ${existingTasks.size} existing tasks with GitHub URLs across ${reposToBackfill.length} projects`);
+
+  // Phase 1: Collect all issues to backfill (respecting per-sync limit)
+  const tasksToCreate = [];
+  const sectionsNeeded = new Map(); // "projectId:milestoneName" -> { projectId, name }
+  const incompleteProjects = new Set(); // Projects that still have more issues to backfill
+  let hitLimit = false;
+
   for (const repo of reposToBackfill) {
     try {
-      console.log(`Auto-backfilling: ${repo.fullRepo}`);
+      console.log(`Scanning issues for: ${repo.fullRepo}`);
+      let repoHasMoreIssues = false;
 
       // Fetch open issues for this repo
       for await (const issue of fetchGitHubIssues(env, repo.owner, repo.name, { state: 'open' })) {
         results.issues++;
 
-        try {
-          // Check if task already exists (using pre-fetched map)
-          if (existingTasks.has(issue.html_url)) {
-            results.skipped++;
-            continue;
-          }
+        // Check if task already exists (using pre-fetched map)
+        if (existingTasks.has(issue.html_url)) {
+          results.skipped++;
+          continue;
+        }
 
-          // Determine section from milestone (if available)
-          let sectionId = null;
-          const milestoneName = issue.milestone?.title;
-          if (milestoneName && sectionCache) {
-            try {
-              sectionId = await getOrCreateSection(env, repo.projectId, milestoneName, sectionCache);
-            } catch (error) {
-              console.error(`Failed to get/create section for milestone "${milestoneName}":`, error);
-              // Continue without section
+        // Check per-sync limit
+        if (tasksToCreate.length >= CONSTANTS.MAX_TASKS_PER_SYNC) {
+          console.log(`Reached per-sync limit of ${CONSTANTS.MAX_TASKS_PER_SYNC} tasks, will continue on next sync`);
+          hitLimit = true;
+          repoHasMoreIssues = true;
+          break;
+        }
+
+        // Determine section from milestone (if available)
+        let sectionId = null;
+        const milestoneName = issue.milestone?.title;
+
+        if (milestoneName && sectionCache) {
+          // Check if section already exists in cache
+          const projectSections = sectionCache.get(String(repo.projectId));
+          if (projectSections?.has(milestoneName)) {
+            sectionId = projectSections.get(milestoneName);
+          } else {
+            // Mark this section as needed for batch creation
+            const sectionKey = `${repo.projectId}:${milestoneName}`;
+            if (!sectionsNeeded.has(sectionKey)) {
+              sectionsNeeded.set(sectionKey, {
+                projectId: repo.projectId,
+                name: milestoneName,
+              });
             }
           }
-
-          // Create task for this issue
-          await createTodoistTask(env, {
-            title: issue.title,
-            issueNumber: issue.number,
-            issueUrl: issue.html_url,
-            projectId: repo.projectId,
-            sectionId: sectionId,
-          });
-
-          results.created++;
-          const sectionInfo = sectionId ? ` (section: ${milestoneName})` : '';
-          console.log(`Auto-backfill created task for: ${repo.fullRepo}#${issue.number}${sectionInfo}`);
-        } catch (error) {
-          console.error(`Auto-backfill error for ${repo.fullRepo}#${issue.number}:`, error);
-          results.errors++;
         }
+
+        tasksToCreate.push({
+          title: issue.title,
+          issueNumber: issue.number,
+          issueUrl: issue.html_url,
+          projectId: repo.projectId,
+          milestoneName: milestoneName,
+          sectionId: sectionId,
+          fullRepo: repo.fullRepo,
+        });
+      }
+
+      // Track if this repo needs more backfilling
+      if (repoHasMoreIssues) {
+        incompleteProjects.add(repo.projectId);
+      }
+
+      // Break outer loop if limit reached
+      if (hitLimit) {
+        // Add all remaining repos to incomplete list
+        const currentIdx = reposToBackfill.findIndex(r => r.projectId === repo.projectId);
+        for (let i = currentIdx + 1; i < reposToBackfill.length; i++) {
+          incompleteProjects.add(reposToBackfill[i].projectId);
+        }
+        break;
       }
     } catch (error) {
-      console.error(`Auto-backfill failed for repo ${repo.fullRepo}:`, error);
+      console.error(`Failed to fetch issues for repo ${repo.fullRepo}:`, error);
       results.errors++;
+      // Mark as incomplete so we retry next sync
+      incompleteProjects.add(repo.projectId);
     }
   }
 
+  if (tasksToCreate.length === 0) {
+    console.log('No new tasks to create');
+    return Array.from(incompleteProjects);
+  }
+
+  console.log(`Collected ${tasksToCreate.length} task(s) to create, ${sectionsNeeded.size} section(s) to create`);
+
+  // Phase 2: Batch create needed sections (1 API call)
+  if (sectionsNeeded.size > 0) {
+    // Limit sections to prevent too many in one sync
+    const sectionsToCreate = Array.from(sectionsNeeded.values()).slice(0, CONSTANTS.MAX_SECTIONS_PER_SYNC);
+
+    if (sectionsToCreate.length > 0) {
+      console.log(`Batch creating ${sectionsToCreate.length} section(s)...`);
+      const createdSections = await batchCreateSections(env, sectionsToCreate);
+
+      // Update section cache and task references
+      for (const [key, sectionId] of createdSections.entries()) {
+        const [projectId, sectionName] = key.split(':');
+
+        // Update cache
+        if (!sectionCache.has(projectId)) {
+          sectionCache.set(projectId, new Map());
+        }
+        sectionCache.get(projectId).set(sectionName, sectionId);
+      }
+
+      // Update tasks with newly created section IDs
+      for (const task of tasksToCreate) {
+        if (task.milestoneName && !task.sectionId) {
+          const sectionKey = `${task.projectId}:${task.milestoneName}`;
+          const newSectionId = createdSections.get(sectionKey);
+          if (newSectionId) {
+            task.sectionId = newSectionId;
+          } else {
+            // Check if it was added to cache by another means
+            const projectSections = sectionCache.get(String(task.projectId));
+            if (projectSections?.has(task.milestoneName)) {
+              task.sectionId = projectSections.get(task.milestoneName);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Phase 3: Batch create all tasks (1-2 API calls depending on batch size)
+  console.log(`Batch creating ${tasksToCreate.length} task(s)...`);
+  const batchResults = await batchCreateTodoistTasks(env, tasksToCreate);
+
+  results.created = batchResults.success;
+  results.errors += batchResults.failed;
+
+  // Log what was created
+  for (const task of tasksToCreate.slice(0, batchResults.success)) {
+    const sectionInfo = task.milestoneName ? ` (section: ${task.milestoneName})` : '';
+    console.log(`Created task for: ${task.fullRepo}#${task.issueNumber}${sectionInfo}`);
+  }
+
+  if (batchResults.errors.length > 0) {
+    console.log(`Batch creation had ${batchResults.errors.length} error(s):`, JSON.stringify(batchResults.errors));
+  }
+
+  const incompleteList = Array.from(incompleteProjects);
+  if (incompleteList.length > 0) {
+    console.log(`Auto-backfill incomplete, ${incompleteList.length} project(s) need more backfilling on next sync`);
+  }
+
   console.log('Auto-backfill completed:', JSON.stringify(results));
+  return incompleteList;
 }
 
 /**
@@ -1800,6 +1929,156 @@ async function createTodoistTask(
 
     return response.json();
   });
+}
+
+/**
+ * Batch create multiple Todoist tasks using the Sync API
+ * This significantly reduces API calls by sending multiple commands in one request
+ *
+ * @param {Object} env - Environment with TODOIST_API_TOKEN
+ * @param {Array} tasks - Array of task objects: { title, issueNumber, issueUrl, projectId, sectionId }
+ * @returns {Object} - { success: number, failed: number, errors: Array }
+ */
+async function batchCreateTodoistTasks(env, tasks) {
+  if (tasks.length === 0) {
+    return { success: 0, failed: 0, errors: [] };
+  }
+
+  const results = { success: 0, failed: 0, errors: [] };
+
+  // Process in batches to avoid hitting any single-request limits
+  const batchSize = CONSTANTS.BATCH_TASK_LIMIT;
+
+  for (let i = 0; i < tasks.length; i += batchSize) {
+    const batch = tasks.slice(i, i + batchSize);
+
+    // Build Sync API commands for this batch
+    const commands = batch.map((task, idx) => ({
+      type: 'item_add',
+      temp_id: `temp_${i + idx}_${Date.now()}`,
+      uuid: crypto.randomUUID(),
+      args: {
+        content: `[#${task.issueNumber}] ${task.title}`,
+        description: task.issueUrl,
+        project_id: task.projectId,
+        ...(task.sectionId && { section_id: task.sectionId }),
+      },
+    }));
+
+    try {
+      const response = await fetch('https://api.todoist.com/sync/v9/sync', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ commands }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Todoist Sync API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+
+      // Check sync_status for individual command results
+      if (data.sync_status) {
+        for (const [uuid, status] of Object.entries(data.sync_status)) {
+          if (status === 'ok') {
+            results.success++;
+          } else {
+            results.failed++;
+            results.errors.push({ uuid, status });
+          }
+        }
+      } else {
+        // If no sync_status, assume all succeeded
+        results.success += batch.length;
+      }
+    } catch (error) {
+      console.error(`Batch task creation failed:`, error);
+      results.failed += batch.length;
+      results.errors.push({ batch: i, error: error.message });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Batch create multiple sections using the Sync API
+ * Returns a map of sectionName -> sectionId for created sections
+ *
+ * @param {Object} env - Environment with TODOIST_API_TOKEN
+ * @param {Array} sections - Array of { projectId, name }
+ * @returns {Map} - Map of "projectId:name" -> sectionId
+ */
+async function batchCreateSections(env, sections) {
+  const createdSections = new Map();
+
+  if (sections.length === 0) {
+    return createdSections;
+  }
+
+  // Build Sync API commands
+  const commands = sections.map((section, idx) => ({
+    type: 'section_add',
+    temp_id: `section_temp_${idx}_${Date.now()}`,
+    uuid: crypto.randomUUID(),
+    args: {
+      name: section.name,
+      project_id: section.projectId,
+    },
+  }));
+
+  try {
+    const response = await fetch('https://api.todoist.com/sync/v9/sync', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.TODOIST_API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ commands }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Todoist Sync API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    // Map temp_ids to real IDs from the response
+    if (data.temp_id_mapping) {
+      for (let i = 0; i < sections.length; i++) {
+        const tempId = `section_temp_${i}_${Date.now()}`;
+        // The temp_id_mapping maps temp_id -> real_id
+        // We need to find our section in the mapping
+        for (const [tid, realId] of Object.entries(data.temp_id_mapping)) {
+          if (tid.startsWith(`section_temp_${i}_`)) {
+            const key = `${sections[i].projectId}:${sections[i].name}`;
+            createdSections.set(key, realId);
+            break;
+          }
+        }
+      }
+    }
+
+    // Also update from sections in the response if available
+    if (data.sections) {
+      for (const section of data.sections) {
+        const key = `${section.project_id}:${section.name}`;
+        createdSections.set(key, section.id);
+      }
+    }
+
+    console.log(`Batch created ${sections.length} section(s)`);
+  } catch (error) {
+    console.error(`Batch section creation failed:`, error);
+  }
+
+  return createdSections;
 }
 
 /**

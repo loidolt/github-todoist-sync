@@ -594,11 +594,11 @@ describe('Auto-Backfill for New Projects', () => {
         },
       ]);
 
-    // Mock Todoist task creation for auto-backfill
+    // Mock batch task creation via Sync API for auto-backfill
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
-      .reply(201, { id: 'auto-backfill-task', content: 'Test' });
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { sync_status: {}, temp_id_mapping: {} });
 
     // Mock GitHub issues for the existing repo (normal sync)
     fetchMock
@@ -616,10 +616,14 @@ describe('Auto-Backfill for New Projects', () => {
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    // Verify new project is now in known projects
+    // Verify both projects are now in known projects
     const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
     expect(state.knownProjectIds).toContain('1002');
+    expect(state.knownProjectIds).toContain(TEST_SUB_PROJECT_ID);
     expect(state.knownProjectIds).toHaveLength(2);
+    // Force backfill flags should be cleared after successful sync
+    expect(state.forceBackfillNextSync).toBe(false);
+    expect(state.forceBackfillProjectIds).toEqual([]);
   });
 
   it('does not re-backfill already known projects', async () => {
@@ -992,11 +996,11 @@ describe('Forced Backfill After Reset', () => {
         },
       ]);
 
-    // Mock Todoist task creation for auto-backfill
+    // Mock batch task creation via Sync API for auto-backfill
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
-      .reply(201, { id: 'forced-backfill-task', content: 'Test' });
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { sync_status: {}, temp_id_mapping: {} });
 
     // Mock Todoist items sync
     fetchMock
@@ -1008,7 +1012,7 @@ describe('Forced Backfill After Reset', () => {
     await worker.scheduled({}, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    // Verify force backfill flag is cleared after sync
+    // Verify force backfill flag is cleared after successful sync
     const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
     expect(state.forceBackfillNextSync).toBe(false);
     expect(state.forceBackfillProjectIds).toEqual([]);
