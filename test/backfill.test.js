@@ -527,3 +527,160 @@ describe('Backfill Org Mode', () => {
     );
   });
 });
+
+describe('Backfill Projects Mode', () => {
+  beforeEach(() => {
+    // Set up ORG_MAPPINGS for projects mode
+    env.ORG_MAPPINGS = JSON.stringify({ '1000': 'test-org' });
+    fetchMock.deactivate();
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+  });
+
+  afterEach(async () => {
+    delete env.ORG_MAPPINGS;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    fetchMock.deactivate();
+  });
+
+  it('returns error if ORG_MAPPINGS not configured', async () => {
+    delete env.ORG_MAPPINGS;
+
+    const request = createBackfillRequest({
+      mode: 'projects',
+      dryRun: true,
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(400);
+    const json = await response.json();
+    expect(json.error).toContain('ORG_MAPPINGS');
+  });
+
+  it('uses Todoist project hierarchy to determine repos', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, {
+        projects: [
+          { id: '1000', name: 'Test Org Issues', parent_id: null },
+          { id: '1001', name: 'repo-a', parent_id: '1000' },
+          { id: '1002', name: 'repo-b', parent_id: '1000' },
+        ],
+        sync_token: 'test-token',
+      });
+
+    // Mock GitHub issues for repo-a
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/repo-a\/issues/ })
+      .reply(200, [
+        {
+          number: 1,
+          title: 'Issue in repo-a',
+          html_url: 'https://github.com/test-org/repo-a/issues/1',
+          labels: [],
+        },
+      ]);
+
+    // Mock GitHub issues for repo-b
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/repo-b\/issues/ })
+      .reply(200, []);
+
+    // Mock Todoist task check
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .reply(200, []);
+
+    const request = createBackfillRequest({
+      mode: 'projects',
+      dryRun: true,
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const events = await readNDJSONStream(response);
+
+    // Should have config event with discovered repos
+    const configEvent = events.find((e) => e.type === 'config');
+    expect(configEvent).toBeDefined();
+    expect(configEvent.mode).toBe('projects');
+    expect(configEvent.repos).toContain('test-org/repo-a');
+    expect(configEvent.repos).toContain('test-org/repo-b');
+
+    // Should start with 2 repos from Todoist hierarchy
+    const startEvent = events.find((e) => e.type === 'start');
+    expect(startEvent.totalRepos).toBe(2);
+
+    // Should include projectId in issue events
+    const issueEvent = events.find((e) => e.type === 'issue');
+    expect(issueEvent.projectId).toBe('1001');
+  });
+
+  it('creates tasks in correct sub-projects', async () => {
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, {
+        projects: [
+          { id: '1000', name: 'Test Org Issues', parent_id: null },
+          { id: '1001', name: 'my-repo', parent_id: '1000' },
+        ],
+        sync_token: 'test-token',
+      });
+
+    // Mock GitHub issues
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/my-repo\/issues/ })
+      .reply(200, [
+        {
+          number: 42,
+          title: 'Test Issue',
+          html_url: 'https://github.com/test-org/my-repo/issues/42',
+          labels: [],
+        },
+      ]);
+
+    // Mock Todoist task check - no existing task
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .reply(200, []);
+
+    // Mock Todoist task creation
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .reply(201, { id: 'new-task-456', content: '[my-repo#42] Test Issue' });
+
+    const request = createBackfillRequest({
+      mode: 'projects',
+      dryRun: false,
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const events = await readNDJSONStream(response);
+
+    const issueEvent = events.find((e) => e.type === 'issue');
+    expect(issueEvent.status).toBe('created');
+    expect(issueEvent.taskId).toBe('new-task-456');
+    expect(issueEvent.projectId).toBe('1001');
+
+    const complete = events.find((e) => e.type === 'complete');
+    expect(complete.summary.created).toBe(1);
+  });
+});

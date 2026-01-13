@@ -141,32 +141,37 @@ The `/backfill` endpoint syncs existing GitHub issues to Todoist. Authentication
 
 **Request:**
 ```bash
-# Dry-run for single repo (preview what would be created)
+# Backfill all repos from Todoist project hierarchy (recommended)
 curl -X POST https://your-worker.workers.dev/backfill \
   -H "Authorization: Bearer $BACKFILL_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"mode": "single-repo", "repo": "my-repo", "dryRun": true}'
+  -d '{"mode": "projects", "dryRun": true}'
 
 # Backfill single repo (open issues only)
 curl -X POST https://your-worker.workers.dev/backfill \
   -H "Authorization: Bearer $BACKFILL_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"mode": "single-repo", "repo": "my-repo"}'
+  -d '{"mode": "single-repo", "repo": "my-repo", "owner": "my-org"}'
 
 # Backfill entire org
 curl -X POST https://your-worker.workers.dev/backfill \
   -H "Authorization: Bearer $BACKFILL_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"mode": "org", "state": "open"}'
+  -d '{"mode": "org", "owner": "my-org", "state": "open"}'
 ```
 
 **Parameters:**
-- `mode`: `"single-repo"` or `"org"` (required)
+- `mode`: `"projects"` (recommended), `"single-repo"`, or `"org"` (required)
 - `repo`: Repository name (required for single-repo mode)
-- `owner`: GitHub owner/org (optional, defaults to `GITHUB_ORG`)
+- `owner`: GitHub owner/org (required for single-repo and org modes)
 - `state`: `"open"`, `"closed"`, or `"all"` (default: `"open"`)
 - `dryRun`: `true` to preview without creating tasks (default: `false`)
-- `limit`: Max issues to process (optional, useful for testing)
+- `limit`: Max issues to process per repo (optional)
+
+**Modes:**
+- `"projects"` - **Recommended.** Uses your Todoist project hierarchy to determine which repos to sync. Tasks are created in the correct sub-projects.
+- `"single-repo"` - Backfill a specific repo (requires `repo` and `owner`)
+- `"org"` - Backfill all repos in an org (requires `owner`)
 
 **Response:** Streaming NDJSON with real-time progress:
 ```json

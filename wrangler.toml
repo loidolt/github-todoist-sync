@@ -13,6 +13,11 @@ id = "2017dc345303435c8f3a36250a22de8a"
 [triggers]
 crons = ["*/15 * * * *"]
 
+[observability]
+[observability.logs]
+enabled = false
+invocation_logs = true
+
 # Secrets are added via `wrangler secret put <NAME>`
 # Required secrets:
 # - GITHUB_WEBHOOK_SECRET

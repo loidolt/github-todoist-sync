@@ -1335,8 +1335,8 @@ function validateBackfillRequest(body, env) {
   const { mode, repo, owner, state = 'open', dryRun = false, limit } = body;
 
   // Validate mode
-  if (!mode || !['single-repo', 'org'].includes(mode)) {
-    return { valid: false, error: 'mode must be "single-repo" or "org"' };
+  if (!mode || !['single-repo', 'org', 'projects'].includes(mode)) {
+    return { valid: false, error: 'mode must be "single-repo", "org", or "projects"' };
   }
 
   // Validate repo for single-repo mode
@@ -1344,10 +1344,16 @@ function validateBackfillRequest(body, env) {
     return { valid: false, error: 'repo is required for single-repo mode' };
   }
 
-  // Validate owner exists (from body or env)
+  // For "projects" mode, owner is not required (uses ORG_MAPPINGS)
+  // For other modes, owner is required
   const effectiveOwner = owner || env.GITHUB_ORG;
-  if (!effectiveOwner) {
+  if (mode !== 'projects' && !effectiveOwner) {
     return { valid: false, error: 'owner is required (or set GITHUB_ORG env var)' };
+  }
+
+  // For "projects" mode, ORG_MAPPINGS is required
+  if (mode === 'projects' && !env.ORG_MAPPINGS) {
+    return { valid: false, error: 'ORG_MAPPINGS env var is required for "projects" mode' };
   }
 
   // Validate state
@@ -1511,8 +1517,13 @@ async function* fetchUserRepos(env, user) {
 
 /**
  * Process a single issue for backfill
+ * @param {Object} env - Environment variables
+ * @param {Object} issue - GitHub issue object
+ * @param {string} repoFullName - Full repo name (owner/repo)
+ * @param {boolean} dryRun - If true, don't actually create tasks
+ * @param {string} [projectId] - Optional Todoist project ID for the task
  */
-async function processBackfillIssue(env, issue, repoFullName, dryRun) {
+async function processBackfillIssue(env, issue, repoFullName, dryRun, projectId = null) {
   try {
     const exists = await taskExistsForIssue(env, issue.html_url);
 
@@ -1524,13 +1535,14 @@ async function processBackfillIssue(env, issue, repoFullName, dryRun) {
       return { status: 'would_create' };
     }
 
-    const [owner, repoName] = repoFullName.split('/');
+    const [, repoName] = repoFullName.split('/');
     const task = await createTodoistTask(env, {
       title: issue.title,
       issueNumber: issue.number,
       repoName: repoName,
       repoFullName: repoFullName,
       issueUrl: issue.html_url,
+      projectId: projectId,
       labels: issue.labels?.map((l) => l.name) || [],
     });
 
@@ -1582,15 +1594,33 @@ async function handleBackfill(request, env, ctx) {
     const todoistLimiter = new RateLimiter(300);
 
     try {
-      // Get list of repos to process
+      // Get list of repos to process (with optional projectId for task creation)
       let repos;
       if (mode === 'single-repo') {
-        repos = [{ owner, name: repo }];
+        repos = [{ owner, name: repo, projectId: null }];
+      } else if (mode === 'projects') {
+        // Use Todoist project hierarchy to determine repos
+        const orgMappings = parseOrgMappings(env);
+        const projects = await fetchTodoistProjects(env);
+        const hierarchy = buildProjectHierarchy(projects, orgMappings);
+
+        repos = Array.from(hierarchy.subProjects.values()).map((p) => ({
+          owner: p.githubOrg,
+          name: p.repoName,
+          projectId: p.id,
+        }));
+
+        await writeJSON({
+          type: 'config',
+          mode: 'projects',
+          orgs: Array.from(orgMappings.values()),
+          repos: repos.map((r) => `${r.owner}/${r.name}`),
+        });
       } else {
-        // Collect repos from async generator
+        // mode === 'org': Collect repos from async generator
         repos = [];
         for await (const r of fetchOrgRepos(env, owner)) {
-          repos.push(r);
+          repos.push({ ...r, projectId: null });
         }
       }
 
@@ -1613,7 +1643,13 @@ async function handleBackfill(request, env, ctx) {
               await todoistLimiter.waitForToken();
             }
 
-            const result = await processBackfillIssue(env, issue, repoFullName, dryRun);
+            const result = await processBackfillIssue(
+              env,
+              issue,
+              repoFullName,
+              dryRun,
+              repoInfo.projectId
+            );
 
             summary.total++;
             if (result.status === 'created' || result.status === 'would_create') {
@@ -1629,6 +1665,7 @@ async function handleBackfill(request, env, ctx) {
               repo: repoFullName,
               issue: issue.number,
               title: issue.title,
+              projectId: repoInfo.projectId,
               ...result,
             });
           }
@@ -1637,6 +1674,7 @@ async function handleBackfill(request, env, ctx) {
             type: 'repo_complete',
             repo: repoFullName,
             issues: repoIssueCount,
+            projectId: repoInfo.projectId,
           });
         } catch (error) {
           console.error(`Failed to process repo ${repoFullName}:`, error);

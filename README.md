@@ -159,9 +159,7 @@ Sync existing GitHub issues to Todoist. Useful for initial setup.
 
 ```json
 {
-  "mode": "single-repo",
-  "repo": "my-repo",
-  "owner": "my-org",
+  "mode": "projects",
   "state": "open",
   "dryRun": false,
   "limit": 100
@@ -170,23 +168,34 @@ Sync existing GitHub issues to Todoist. Useful for initial setup.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `mode` | Yes | `"single-repo"` or `"org"` |
+| `mode` | Yes | `"projects"` (recommended), `"single-repo"`, or `"org"` |
 | `repo` | For single-repo | Repository name |
-| `owner` | No | GitHub owner (defaults to first org in `ORG_MAPPINGS`) |
+| `owner` | For single-repo/org | GitHub owner |
 | `state` | No | `"open"`, `"closed"`, or `"all"` (default: `"open"`) |
 | `dryRun` | No | Preview without creating tasks (default: `false`) |
-| `limit` | No | Max issues to process |
+| `limit` | No | Max issues to process per repo |
+
+**Modes:**
+- `"projects"` - **Recommended.** Uses your Todoist project hierarchy to determine which repos to sync. Tasks are created in the correct sub-projects.
+- `"single-repo"` - Backfill a specific repo (requires `repo` and `owner`)
+- `"org"` - Backfill all repos in an org (requires `owner`)
 
 **Examples:**
 
 ```bash
-# Dry-run for a single repo
+# Backfill all repos from Todoist project hierarchy (recommended)
 curl -X POST https://your-worker.workers.dev/backfill \
   -H "Authorization: Bearer $BACKFILL_SECRET" \
   -H "Content-Type: application/json" \
-  -d '{"mode": "single-repo", "repo": "my-repo", "owner": "my-org", "dryRun": true}'
+  -d '{"mode": "projects", "dryRun": true}'
 
-# Backfill all open issues from an org
+# Backfill a single repo
+curl -X POST https://your-worker.workers.dev/backfill \
+  -H "Authorization: Bearer $BACKFILL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "single-repo", "repo": "my-repo", "owner": "my-org"}'
+
+# Backfill all repos from a GitHub org
 curl -X POST https://your-worker.workers.dev/backfill \
   -H "Authorization: Bearer $BACKFILL_SECRET" \
   -H "Content-Type: application/json" \
