@@ -107,6 +107,84 @@ function getOpenApiSpec(baseUrl) {
           },
         },
       },
+      '/reset-projects': {
+        post: {
+          summary: 'Reset known projects to trigger auto-backfill',
+          description: 'Resets the known projects list so that the next sync will auto-backfill all (or specified) projects. Requires Bearer authentication.',
+          tags: ['Admin'],
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    mode: {
+                      type: 'string',
+                      enum: ['all', 'specific'],
+                      default: 'all',
+                      description: 'Reset mode: "all" resets all projects, "specific" resets only specified project IDs',
+                    },
+                    projectIds: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'Project IDs to reset (only for "specific" mode)',
+                    },
+                    dryRun: {
+                      type: 'boolean',
+                      default: false,
+                      description: 'Preview mode - shows what would be reset without making changes',
+                    },
+                  },
+                },
+                examples: {
+                  'reset-all': {
+                    summary: 'Reset all projects',
+                    value: { mode: 'all' },
+                  },
+                  'reset-specific': {
+                    summary: 'Reset specific projects',
+                    value: { mode: 'specific', projectIds: ['1001', '1002'] },
+                  },
+                  'dry-run': {
+                    summary: 'Preview reset',
+                    value: { mode: 'all', dryRun: true },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'Projects reset successfully',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean' },
+                      message: { type: 'string' },
+                      resetProjects: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Project IDs that will be backfilled on next sync',
+                      },
+                      remainingKnownProjects: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: 'Project IDs that will NOT be backfilled',
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            400: { description: 'Invalid request' },
+            401: { description: 'Unauthorized' },
+          },
+        },
+      },
       '/backfill': {
         post: {
           summary: 'Backfill existing GitHub issues to Todoist',
@@ -232,6 +310,7 @@ function getOpenApiSpec(baseUrl) {
     },
     tags: [
       { name: 'Health', description: 'Service health and sync status endpoints' },
+      { name: 'Admin', description: 'Administrative endpoints for managing sync state' },
       { name: 'Backfill', description: 'Backfill existing issues to Todoist' },
     ],
   };
@@ -1256,13 +1335,23 @@ async function performBidirectionalSync(env) {
     const hasKnownProjects = state.knownProjectIds !== undefined && state.knownProjectIds.length > 0;
     const newProjectIds = currentProjectIds.filter((id) => !knownProjectIds.has(id));
 
-    if (newProjectIds.length > 0 && hasKnownProjects) {
+    // Check for forced backfill (triggered by POST /reset-projects)
+    const forceBackfill = state.forceBackfillNextSync === true;
+    const forceBackfillProjectIds = state.forceBackfillProjectIds || [];
+
+    if (forceBackfill && forceBackfillProjectIds.length > 0) {
+      // Forced backfill from POST /reset-projects
+      console.log(`Forced backfill triggered for ${forceBackfillProjectIds.length} project(s):`, forceBackfillProjectIds);
+      results.autoBackfill.newProjects = forceBackfillProjectIds.length;
+
+      await performAutoBackfill(env, forceBackfillProjectIds, projectHierarchy, results.autoBackfill, sectionCache);
+    } else if (newProjectIds.length > 0 && hasKnownProjects) {
       // We have a baseline and detected new projects - auto-backfill them
       console.log(`Detected ${newProjectIds.length} new project(s) for auto-backfill:`, newProjectIds);
       results.autoBackfill.newProjects = newProjectIds.length;
 
       await performAutoBackfill(env, newProjectIds, projectHierarchy, results.autoBackfill, sectionCache);
-    } else if (!hasKnownProjects) {
+    } else if (!hasKnownProjects && !forceBackfill) {
       // No baseline yet - record current projects without backfilling
       if (state.pollCount > 0) {
         // Migration: previous syncs existed but didn't track projects (older code version)
@@ -1277,7 +1366,7 @@ async function performBidirectionalSync(env) {
             `Future new projects will be auto-backfilled. To backfill existing repos, use POST /backfill`
         );
       }
-    } else if (newProjectIds.length === 0) {
+    } else if (newProjectIds.length === 0 && !forceBackfill) {
       console.log(`No new projects detected (tracking ${knownProjectIds.size} project(s))`);
     }
 
@@ -1323,12 +1412,15 @@ async function performBidirectionalSync(env) {
     }
 
     // Save updated sync state (including all known project IDs)
+    // Clear force backfill flags after sync completes
     const newState = {
       lastGitHubSync: new Date().toISOString(),
       todoistSyncToken: newSyncToken,
       lastPollTime: new Date().toISOString(),
       pollCount: state.pollCount + 1,
       knownProjectIds: currentProjectIds, // Track all current projects
+      forceBackfillNextSync: false, // Clear force flag
+      forceBackfillProjectIds: [], // Clear force project list
     };
     await saveSyncState(env, newState);
 
@@ -1472,6 +1564,117 @@ async function handleSyncStatus(env) {
   }
 }
 
+/**
+ * Handle POST /reset-projects request
+ * Resets known projects to trigger auto-backfill on next sync
+ */
+async function handleResetProjects(request, env) {
+  // Authenticate using same auth as backfill
+  if (!verifyBackfillAuth(request, env)) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  // Parse request body (optional)
+  let body = {};
+  try {
+    const text = await request.text();
+    if (text) {
+      body = JSON.parse(text);
+    }
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON' }, 400);
+  }
+
+  const { mode = 'all', projectIds = [], dryRun = false } = body;
+
+  // Validate mode
+  if (!['all', 'specific'].includes(mode)) {
+    return jsonResponse({ error: 'mode must be "all" or "specific"' }, 400);
+  }
+
+  // Validate projectIds for specific mode
+  if (mode === 'specific') {
+    if (!Array.isArray(projectIds) || projectIds.length === 0) {
+      return jsonResponse({ error: 'projectIds array is required for "specific" mode' }, 400);
+    }
+    if (!projectIds.every(id => typeof id === 'string')) {
+      return jsonResponse({ error: 'projectIds must be an array of strings' }, 400);
+    }
+  }
+
+  try {
+    // Load current sync state
+    const state = await loadSyncState(env);
+    const currentKnownProjects = state.knownProjectIds || [];
+
+    // Fetch current Todoist project hierarchy to show what will be backfilled
+    const orgMappings = parseOrgMappings(env);
+    const projects = await fetchTodoistProjects(env);
+    const hierarchy = buildProjectHierarchy(projects, orgMappings);
+    const currentProjectIds = Array.from(hierarchy.subProjects.keys());
+
+    let resetProjectIds;
+    let remainingKnownProjects;
+
+    if (mode === 'all') {
+      // Reset all - use sentinel to trigger backfill for all projects
+      resetProjectIds = currentProjectIds;
+      remainingKnownProjects = [];
+    } else {
+      // Specific mode - only reset specified projects
+      const projectIdsSet = new Set(projectIds.map(String));
+      resetProjectIds = currentProjectIds.filter(id => projectIdsSet.has(id));
+      remainingKnownProjects = currentKnownProjects.filter(id => !projectIdsSet.has(String(id)));
+    }
+
+    // Build response with project details
+    const projectDetails = resetProjectIds.map(id => {
+      const project = hierarchy.subProjects.get(id);
+      return {
+        id,
+        name: project?.name || 'unknown',
+        repo: project?.fullRepo || 'unknown',
+      };
+    });
+
+    if (dryRun) {
+      return jsonResponse({
+        success: true,
+        dryRun: true,
+        message: `Would reset ${resetProjectIds.length} project(s) for backfill on next sync`,
+        resetProjects: projectDetails,
+        remainingKnownProjects: remainingKnownProjects,
+        currentKnownProjects: currentKnownProjects.length,
+      });
+    }
+
+    // Actually reset the state
+    // Set knownProjectIds to only contain projects we DON'T want to backfill
+    // Also set forceBackfillNextSync flag to ensure backfill happens even if knownProjectIds is empty
+    const newState = {
+      ...state,
+      knownProjectIds: remainingKnownProjects,
+      forceBackfillNextSync: true, // Flag to trigger backfill on next sync
+      forceBackfillProjectIds: resetProjectIds, // Projects to backfill
+    };
+
+    await saveSyncState(env, newState);
+
+    console.log(`Reset ${resetProjectIds.length} project(s) for auto-backfill. Remaining known: ${remainingKnownProjects.length}`);
+
+    return jsonResponse({
+      success: true,
+      message: `Reset ${resetProjectIds.length} project(s). They will be auto-backfilled on the next sync.`,
+      resetProjects: projectDetails,
+      remainingKnownProjects: remainingKnownProjects,
+      nextSyncWillBackfill: resetProjectIds.length,
+    });
+  } catch (error) {
+    console.error('Failed to reset projects:', error);
+    return jsonResponse({ error: error.message }, 500);
+  }
+}
+
 // =============================================================================
 // Main Worker Export
 // =============================================================================
@@ -1482,6 +1685,10 @@ export default {
     const baseUrl = `${url.protocol}//${url.host}`;
 
     // Route requests
+    if (request.method === 'POST' && url.pathname === '/reset-projects') {
+      return handleResetProjects(request, env);
+    }
+
     if (request.method === 'POST' && url.pathname === '/backfill') {
       return handleBackfill(request, env, ctx);
     }

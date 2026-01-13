@@ -784,6 +784,238 @@ describe('Milestone to Section Sync', () => {
   });
 });
 
+describe('Reset Projects Endpoint', () => {
+  beforeEach(() => {
+    setupOrgMappings();
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+  });
+
+  it('rejects unauthenticated requests', async () => {
+    const request = new Request('http://localhost/reset-projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'all' }),
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(401);
+  });
+
+  it('resets all projects for backfill', async () => {
+    // Set up initial state with known projects
+    await env.WEBHOOK_CACHE.put(
+      'sync:state',
+      JSON.stringify({
+        lastGitHubSync: '2024-01-15T10:30:00Z',
+        todoistSyncToken: 'existing-token',
+        lastPollTime: '2024-01-15T10:30:00Z',
+        pollCount: 5,
+        knownProjectIds: [TEST_SUB_PROJECT_ID],
+      })
+    );
+
+    // Mock Todoist projects API
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    const request = new Request('http://localhost/reset-projects', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.BACKFILL_SECRET}`,
+      },
+      body: JSON.stringify({ mode: 'all' }),
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.success).toBe(true);
+    expect(json.resetProjects).toHaveLength(1);
+    expect(json.resetProjects[0].id).toBe(TEST_SUB_PROJECT_ID);
+
+    // Verify state was updated with force backfill flag
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.forceBackfillNextSync).toBe(true);
+    expect(state.forceBackfillProjectIds).toContain(TEST_SUB_PROJECT_ID);
+  });
+
+  it('supports dry run mode', async () => {
+    // Set up initial state
+    await env.WEBHOOK_CACHE.put(
+      'sync:state',
+      JSON.stringify({
+        lastGitHubSync: '2024-01-15T10:30:00Z',
+        todoistSyncToken: 'existing-token',
+        lastPollTime: '2024-01-15T10:30:00Z',
+        pollCount: 5,
+        knownProjectIds: [TEST_SUB_PROJECT_ID],
+      })
+    );
+
+    // Mock Todoist projects API
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    const request = new Request('http://localhost/reset-projects', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.BACKFILL_SECRET}`,
+      },
+      body: JSON.stringify({ mode: 'all', dryRun: true }),
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.success).toBe(true);
+    expect(json.dryRun).toBe(true);
+
+    // Verify state was NOT modified
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.forceBackfillNextSync).toBeUndefined();
+  });
+
+  it('resets specific projects only', async () => {
+    // Set up initial state with multiple known projects
+    await env.WEBHOOK_CACHE.put(
+      'sync:state',
+      JSON.stringify({
+        lastGitHubSync: '2024-01-15T10:30:00Z',
+        todoistSyncToken: 'existing-token',
+        lastPollTime: '2024-01-15T10:30:00Z',
+        pollCount: 5,
+        knownProjectIds: [TEST_SUB_PROJECT_ID, '1002'],
+      })
+    );
+
+    // Mock Todoist projects with multiple sub-projects
+    const projectsWithMultiple = [
+      ...DEFAULT_PROJECTS,
+      { id: '1002', name: 'other-repo', parent_id: TEST_PARENT_PROJECT_ID },
+    ];
+
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: projectsWithMultiple, sync_token: 'projects-token' });
+
+    const request = new Request('http://localhost/reset-projects', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.BACKFILL_SECRET}`,
+      },
+      body: JSON.stringify({ mode: 'specific', projectIds: [TEST_SUB_PROJECT_ID] }),
+    });
+
+    const ctx = createExecutionContext();
+    const response = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.success).toBe(true);
+    expect(json.resetProjects).toHaveLength(1);
+    expect(json.resetProjects[0].id).toBe(TEST_SUB_PROJECT_ID);
+
+    // Verify state - only specified project should be reset
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.forceBackfillProjectIds).toContain(TEST_SUB_PROJECT_ID);
+    expect(state.forceBackfillProjectIds).not.toContain('1002');
+  });
+});
+
+describe('Forced Backfill After Reset', () => {
+  beforeEach(() => {
+    setupOrgMappings();
+    fetchMock.activate();
+    fetchMock.disableNetConnect();
+  });
+
+  it('triggers backfill when forceBackfillNextSync is set', async () => {
+    // Set up state with force backfill flag
+    await env.WEBHOOK_CACHE.put(
+      'sync:state',
+      JSON.stringify({
+        lastGitHubSync: '2024-01-15T10:30:00Z',
+        todoistSyncToken: 'existing-token',
+        lastPollTime: '2024-01-15T10:30:00Z',
+        pollCount: 5,
+        knownProjectIds: [], // Empty - but force flag should trigger
+        forceBackfillNextSync: true,
+        forceBackfillProjectIds: [TEST_SUB_PROJECT_ID],
+      })
+    );
+
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
+    // Mock Todoist batch task fetch for auto-backfill (no existing tasks)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'batch-token' });
+
+    // Mock GitHub issues for the repo (for auto-backfill)
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues/ })
+      .reply(200, [
+        {
+          number: 1,
+          title: 'Issue to backfill',
+          html_url: 'https://github.com/test-org/test-repo/issues/1',
+          state: 'open',
+          labels: [],
+        },
+      ]);
+
+    // Mock Todoist task creation for auto-backfill
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .reply(201, { id: 'forced-backfill-task', content: 'Test' });
+
+    // Mock Todoist items sync
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    // Verify force backfill flag is cleared after sync
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.forceBackfillNextSync).toBe(false);
+    expect(state.forceBackfillProjectIds).toEqual([]);
+    expect(state.pollCount).toBe(6);
+  });
+});
+
 describe('Section to Milestone Sync', () => {
   beforeEach(() => {
     setupOrgMappings();

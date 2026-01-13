@@ -80,6 +80,7 @@ Single-file worker (`src/worker.js`) with the following HTTP routes:
 - `GET /health` - Health check endpoint
 - `GET /sync-status` - Returns polling sync status and health information
 - `POST /backfill` - Backfill existing GitHub issues to Todoist (requires Bearer auth)
+- `POST /reset-projects` - Reset known projects to trigger auto-backfill on next sync (requires Bearer auth)
 - `GET /api-docs` - Swagger UI documentation interface
 - `GET /openapi.json` - OpenAPI 3.0 specification
 - `GET /` - Redirects to `/api-docs`
@@ -105,9 +106,13 @@ Uses Cloudflare Cron Triggers to poll both platforms every 15 minutes. This appr
   "todoistSyncToken": "VRyFHa...",
   "lastPollTime": "2024-01-15T10:30:00Z",
   "pollCount": 42,
-  "knownProjectIds": ["1001", "1002"]
+  "knownProjectIds": ["1001", "1002"],
+  "forceBackfillNextSync": false,
+  "forceBackfillProjectIds": []
 }
 ```
+
+The `forceBackfillNextSync` and `forceBackfillProjectIds` fields are set by the `/reset-projects` endpoint to trigger backfill on the next sync cycle.
 
 **Check sync status:**
 ```bash
@@ -223,6 +228,61 @@ curl -X POST https://your-worker.workers.dev/backfill \
 {"type": "repo_complete", "repo": "owner/repo", "issues": 2}
 {"type": "complete", "summary": {"total": 2, "created": 1, "skipped": 1, "failed": 0}}
 ```
+
+### Reset Projects Endpoint
+
+The `/reset-projects` endpoint resets the known projects list to trigger auto-backfill on the next sync. This is useful when you want to re-backfill existing repos without adding new sub-projects. Authentication uses Bearer token (same as backfill).
+
+**Request:**
+```bash
+# Preview what would be reset (dry run)
+curl -X POST https://your-worker.workers.dev/reset-projects \
+  -H "Authorization: Bearer $BACKFILL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "all", "dryRun": true}'
+
+# Reset all projects - triggers backfill for all repos on next sync
+curl -X POST https://your-worker.workers.dev/reset-projects \
+  -H "Authorization: Bearer $BACKFILL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "all"}'
+
+# Reset specific projects only
+curl -X POST https://your-worker.workers.dev/reset-projects \
+  -H "Authorization: Bearer $BACKFILL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "specific", "projectIds": ["1001", "1002"]}'
+```
+
+**Parameters:**
+- `mode`: `"all"` or `"specific"` (default: `"all"`)
+- `projectIds`: Array of project IDs to reset (required for `"specific"` mode)
+- `dryRun`: `true` to preview without making changes (default: `false`)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Reset 3 project(s). They will be auto-backfilled on the next sync.",
+  "resetProjects": [
+    {"id": "1001", "name": "api", "repo": "my-org/api"},
+    {"id": "1002", "name": "web", "repo": "my-org/web"}
+  ],
+  "remainingKnownProjects": [],
+  "nextSyncWillBackfill": 2
+}
+```
+
+**How it works:**
+1. The endpoint sets a `forceBackfillNextSync` flag in the sync state
+2. On the next scheduled sync (within 15 minutes), the worker detects this flag
+3. All reset projects are auto-backfilled (open issues synced to Todoist)
+4. The flag is automatically cleared after the sync completes
+
+**Use cases:**
+- Re-sync all issues after making changes to existing tasks
+- Recover from a failed or incomplete initial backfill
+- Force a fresh sync without waiting for new projects to be detected
 
 ## Testing
 
