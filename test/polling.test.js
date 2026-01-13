@@ -543,6 +543,71 @@ describe('Task Completion Sync', () => {
     expect(state.pollCount).toBe(1);
     expect(state.lastCompletedSync).toBeDefined();
   });
+
+  it('uses KV mapping to find GitHub URL for completed task', async () => {
+    // Pre-populate KV with task mapping (simulates task created previously)
+    await env.WEBHOOK_CACHE.put('task:task-456', 'https://github.com/test-org/test-repo/issues/2');
+
+    // Mock Todoist projects
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
+
+    // Mock Todoist sections
+    mockTodoistSections(fetchMock, TEST_SUB_PROJECT_ID);
+
+    // Mock GitHub issues
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: /\/repos\/test-org\/test-repo\/issues\?/ })
+      .reply(200, []);
+
+    // Mock GitHub issue GET
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ path: '/repos/test-org/test-repo/issues/2' })
+      .reply(200, { number: 2, state: 'open' });
+
+    // Mock GitHub issue PATCH (close)
+    fetchMock
+      .get('https://api.github.com')
+      .intercept({ method: 'PATCH', path: '/repos/test-org/test-repo/issues/2' })
+      .reply(200, { number: 2, state: 'closed' });
+
+    // Mock Todoist items sync
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
+
+    // Mock completed/get_all - returns task WITHOUT description (realistic scenario)
+    fetchMock
+      .get('https://api.todoist.com')
+      .intercept({ path: /\/sync\/v9\/completed\/get_all/ })
+      .reply(200, {
+        items: [
+          {
+            task_id: 'task-456',
+            project_id: TEST_SUB_PROJECT_ID,
+            content: '[#2] Task from KV',
+            completed_at: '2024-01-15T10:30:00Z',
+            // Note: NO description field - this is realistic for completed/get_all
+          },
+        ],
+      });
+
+    const ctx = createExecutionContext();
+    await worker.scheduled({}, env, ctx);
+    await waitOnExecutionContext(ctx);
+
+    const state = await env.WEBHOOK_CACHE.get('sync:state', 'json');
+    expect(state.pollCount).toBe(1);
+
+    // KV mapping should be cleaned up after successful close
+    const mapping = await env.WEBHOOK_CACHE.get('task:task-456');
+    expect(mapping).toBeNull();
+  });
 });
 
 describe('Auto-Backfill for New Projects', () => {

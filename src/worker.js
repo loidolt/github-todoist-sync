@@ -1494,9 +1494,22 @@ async function performBidirectionalSync(env) {
     // Process completed tasks - close corresponding GitHub issues
     for (const completedTask of completedTasks) {
       try {
-        const githubInfo = parseGitHubUrl(completedTask.description);
+        // Try to get GitHub URL from KV mapping first (more reliable)
+        // Fall back to description from API response (may not be available)
+        let githubUrl = await env.WEBHOOK_CACHE.get(`task:${completedTask.id}`);
+        if (!githubUrl && completedTask.description) {
+          githubUrl = completedTask.description;
+        }
+
+        if (!githubUrl) {
+          // No GitHub URL found - task was either created in Todoist or mapping doesn't exist
+          console.log(`No GitHub URL found for completed task ${completedTask.id} (${completedTask.content})`);
+          continue;
+        }
+
+        const githubInfo = parseGitHubUrl(githubUrl);
         if (!githubInfo) {
-          // Task doesn't have a GitHub URL - it was created in Todoist, nothing to close
+          // URL doesn't look like a GitHub issue URL
           continue;
         }
 
@@ -1511,6 +1524,13 @@ async function performBidirectionalSync(env) {
           console.log(`Closing issue for completed task: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`);
           await closeGitHubIssue(env, githubInfo);
           results.todoist.closed++;
+
+          // Clean up the KV mapping since the task is done
+          try {
+            await env.WEBHOOK_CACHE.delete(`task:${completedTask.id}`);
+          } catch (e) {
+            // Ignore cleanup errors
+          }
         }
       } catch (error) {
         console.error(`Error processing completed task ${completedTask.id}:`, error);
@@ -2010,7 +2030,7 @@ async function createTodoistTask(
     taskData.section_id = sectionId;
   }
 
-  return withRetry(async () => {
+  const task = await withRetry(async () => {
     const response = await fetch('https://api.todoist.com/rest/v2/tasks', {
       method: 'POST',
       headers: {
@@ -2027,6 +2047,20 @@ async function createTodoistTask(
 
     return response.json();
   });
+
+  // Store mapping from task ID to GitHub issue URL for completed task processing
+  // The /completed/get_all endpoint doesn't return description, so we need this mapping
+  if (task && task.id) {
+    try {
+      await env.WEBHOOK_CACHE.put(`task:${task.id}`, issueUrl, {
+        expirationTtl: 60 * 60 * 24 * 365, // 1 year TTL
+      });
+    } catch (error) {
+      console.warn(`Failed to store task mapping for ${task.id}:`, error);
+    }
+  }
+
+  return task;
 }
 
 /**
@@ -2051,17 +2085,23 @@ async function batchCreateTodoistTasks(env, tasks) {
     const batch = tasks.slice(i, i + batchSize);
 
     // Build Sync API commands for this batch
-    const commands = batch.map((task, idx) => ({
-      type: 'item_add',
-      temp_id: `temp_${i + idx}_${Date.now()}`,
-      uuid: crypto.randomUUID(),
-      args: {
-        content: `[#${task.issueNumber}] ${task.title}`,
-        description: task.issueUrl,
-        project_id: task.projectId,
-        ...(task.sectionId && { section_id: task.sectionId }),
-      },
-    }));
+    // Store temp_id -> issueUrl mapping for later KV storage
+    const tempIdToIssueUrl = new Map();
+    const commands = batch.map((task, idx) => {
+      const tempId = `temp_${i + idx}_${Date.now()}`;
+      tempIdToIssueUrl.set(tempId, task.issueUrl);
+      return {
+        type: 'item_add',
+        temp_id: tempId,
+        uuid: crypto.randomUUID(),
+        args: {
+          content: `[#${task.issueNumber}] ${task.title}`,
+          description: task.issueUrl,
+          project_id: task.projectId,
+          ...(task.sectionId && { section_id: task.sectionId }),
+        },
+      };
+    });
 
     try {
       const response = await fetch('https://api.todoist.com/sync/v9/sync', {
@@ -2093,6 +2133,23 @@ async function batchCreateTodoistTasks(env, tasks) {
       } else {
         // If no sync_status, assume all succeeded
         results.success += batch.length;
+      }
+
+      // Store task ID -> GitHub URL mappings for completed task processing
+      // temp_id_mapping maps temp_id -> actual task_id
+      if (data.temp_id_mapping) {
+        for (const [tempId, taskId] of Object.entries(data.temp_id_mapping)) {
+          const issueUrl = tempIdToIssueUrl.get(tempId);
+          if (issueUrl && taskId) {
+            try {
+              await env.WEBHOOK_CACHE.put(`task:${taskId}`, issueUrl, {
+                expirationTtl: 60 * 60 * 24 * 365, // 1 year TTL
+              });
+            } catch (error) {
+              console.warn(`Failed to store task mapping for ${taskId}:`, error);
+            }
+          }
+        }
       }
     } catch (error) {
       console.error(`Batch task creation failed:`, error);
