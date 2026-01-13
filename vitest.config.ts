@@ -14,6 +14,7 @@ export default defineWorkersConfig({
             TODOIST_WEBHOOK_SECRET: "test-todoist-secret",
             TODOIST_PROJECT_ID: "123456",
             GITHUB_ORG: "test-org",
+            BACKFILL_SECRET: "test-backfill-secret",
           },
         },
       },
