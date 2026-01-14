@@ -3,16 +3,22 @@
   "version": "1.0.0",
   "private": true,
   "description": "Cloudflare Worker that syncs GitHub issues to Todoist tasks",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "test": "vitest",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "wrangler": "^3.0.0",
+    "@cloudflare/vitest-pool-workers": "^0.10.0",
+    "@cloudflare/workers-types": "^4.20250102.0",
+    "typescript": "^5.7.0",
     "vitest": "~3.2.0",
-    "@cloudflare/vitest-pool-workers": "^0.10.0"
+    "wrangler": "^3.0.0"
   }
 }

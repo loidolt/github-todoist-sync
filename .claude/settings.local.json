@@ -12,7 +12,13 @@
       "Bash(npm test:*)",
       "Bash(npx vitest:*)",
       "Bash(curl:*)",
-      "WebFetch(domain:docs.github.com)"
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:github-todoist-sync.loidolt.workers.dev)",
+      "Bash(git -C /Users/chrisloidolt/Documents/GitHub/github-todoist-sync diff 222ce56..7ed23a7 -- src/worker.js)",
+      "Bash(wc:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

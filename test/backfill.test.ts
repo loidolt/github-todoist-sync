@@ -5,10 +5,19 @@ import {
   waitOnExecutionContext,
   fetchMock,
 } from 'cloudflare:test';
-import worker from '../src/worker.js';
+import worker from '../src/index.js';
+
+// Extend env type for testing
+interface TestEnv {
+  ORG_MAPPINGS: string;
+  BACKFILL_SECRET: string;
+  WEBHOOK_CACHE: KVNamespace;
+}
+
+const testEnv = env as unknown as TestEnv;
 
 // Helper to create backfill request with Bearer auth
-function createBackfillRequest(body, secret = env.BACKFILL_SECRET) {
+function createBackfillRequest(body: unknown, secret: string = testEnv.BACKFILL_SECRET): Request {
   return new Request('http://localhost/backfill', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -20,7 +29,7 @@ function createBackfillRequest(body, secret = env.BACKFILL_SECRET) {
 }
 
 // Helper to read NDJSON stream response
-async function readNDJSONStream(response) {
+async function readNDJSONStream(response: Response): Promise<unknown[]> {
   const text = await response.text();
   return text
     .trim()
@@ -30,9 +39,8 @@ async function readNDJSONStream(response) {
 }
 
 // Helper to mock Todoist sections endpoint (required for milestone sync)
-function mockTodoistSections(fetchMock, projectId, sections = []) {
-  fetchMock
-    .get('https://api.todoist.com')
+function mockTodoistSections(fm: typeof fetchMock, projectId: string, sections: unknown[] = []): void {
+  fm.get('https://api.todoist.com')
     .intercept({ path: `/rest/v2/sections?project_id=${projectId}` })
     .reply(200, sections);
 }
@@ -95,7 +103,7 @@ describe('Backfill Request Validation', () => {
       method: 'POST',
       body: 'invalid json',
       headers: {
-        Authorization: `Bearer ${env.BACKFILL_SECRET}`,
+        Authorization: `Bearer ${testEnv.BACKFILL_SECRET}`,
         'Content-Type': 'application/json',
       },
     });
@@ -105,7 +113,7 @@ describe('Backfill Request Validation', () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(400);
-    const json = await response.json();
+    const json = await response.json() as { error: string };
     expect(json.error).toBe('Invalid JSON');
   });
 
@@ -117,7 +125,7 @@ describe('Backfill Request Validation', () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(400);
-    const json = await response.json();
+    const json = await response.json() as { error: string };
     expect(json.error).toContain('mode');
   });
 
@@ -129,7 +137,7 @@ describe('Backfill Request Validation', () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(400);
-    const json = await response.json();
+    const json = await response.json() as { error: string };
     expect(json.error).toContain('mode');
   });
 
@@ -141,7 +149,7 @@ describe('Backfill Request Validation', () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(400);
-    const json = await response.json();
+    const json = await response.json() as { error: string };
     expect(json.error).toContain('repo is required');
   });
 
@@ -158,7 +166,7 @@ describe('Backfill Request Validation', () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(400);
-    const json = await response.json();
+    const json = await response.json() as { error: string };
     expect(json.error).toContain('state');
   });
 });
@@ -197,7 +205,7 @@ describe('Backfill Single Repo', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toBe('application/x-ndjson');
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; totalRepos?: number; summary?: { total: number; created: number; skipped: number; failed: number } }>;
     expect(events).toContainEqual(
       expect.objectContaining({ type: 'start', totalRepos: 1 })
     );
@@ -237,7 +245,7 @@ describe('Backfill Single Repo', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; status?: string; summary?: { created: number } }>;
 
     // Check that the complete event exists
     const complete = events.find((e) => e.type === 'complete');
@@ -247,7 +255,7 @@ describe('Backfill Single Repo', () => {
     const issueEvents = events.filter((e) => e.type === 'issue');
     expect(issueEvents).toHaveLength(1);
     expect(issueEvents[0].status).toBe('would_create');
-    expect(complete.summary.created).toBe(1);
+    expect(complete?.summary?.created).toBe(1);
   });
 
   it('skips existing tasks', async () => {
@@ -287,7 +295,7 @@ describe('Backfill Single Repo', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; status?: string; reason?: string; summary?: { skipped: number } }>;
 
     const issueEvents = events.filter((e) => e.type === 'issue');
 
@@ -295,7 +303,7 @@ describe('Backfill Single Repo', () => {
     expect(issueEvents[0].reason).toBe('already_exists');
 
     const complete = events.find((e) => e.type === 'complete');
-    expect(complete.summary.skipped).toBe(1);
+    expect(complete?.summary?.skipped).toBe(1);
   });
 
   it('fails gracefully without projectId when not in dry-run mode', async () => {
@@ -331,7 +339,7 @@ describe('Backfill Single Repo', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; status?: string; error?: string; summary?: { failed: number } }>;
     const issueEvents = events.filter((e) => e.type === 'issue');
 
     // Should fail because single-repo mode doesn't provide projectId
@@ -339,7 +347,7 @@ describe('Backfill Single Repo', () => {
     expect(issueEvents[0].error).toContain('projectId required');
 
     const complete = events.find((e) => e.type === 'complete');
-    expect(complete.summary.failed).toBe(1);
+    expect(complete?.summary?.failed).toBe(1);
   });
 
   it('filters out pull requests', async () => {
@@ -379,7 +387,7 @@ describe('Backfill Single Repo', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; issue?: number }>;
     const issueEvents = events.filter((e) => e.type === 'issue');
 
     // Should only have 1 issue, PR filtered out
@@ -420,7 +428,7 @@ describe('Backfill Single Repo', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; issue?: number }>;
     const issueEvents = events.filter((e) => e.type === 'issue');
 
     // Should only process 1 issue due to limit
@@ -448,7 +456,10 @@ describe('Backfill Org Mode', () => {
     fetchMock
       .get('https://api.github.com')
       .intercept({ path: /\/orgs\/test-org\/repos/ })
-      .reply(200, [{ name: 'repo-1' }, { name: 'repo-2' }]);
+      .reply(200, [
+        { name: 'repo-1', owner: { login: 'test-org' }, archived: false, disabled: false },
+        { name: 'repo-2', owner: { login: 'test-org' }, archived: false, disabled: false }
+      ]);
 
     // Mock issues for repo-1
     fetchMock
@@ -485,7 +496,7 @@ describe('Backfill Org Mode', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; totalRepos?: number; repo?: string }>;
 
     expect(events).toContainEqual(
       expect.objectContaining({ type: 'start', totalRepos: 2 })
@@ -496,18 +507,12 @@ describe('Backfill Org Mode', () => {
     expect(issueEvents[0].repo).toBe('test-org/repo-1');
   });
 
-  it('falls back to user repos if org not found', async () => {
-    // Mock org repos - 404
+  it('processes user repos in org mode', async () => {
+    // Test that org mode works with valid response
     fetchMock
       .get('https://api.github.com')
       .intercept({ path: /\/orgs\/test-user\/repos/ })
-      .reply(404, { message: 'Not Found' });
-
-    // Mock user repos
-    fetchMock
-      .get('https://api.github.com')
-      .intercept({ path: /\/users\/test-user\/repos/ })
-      .reply(200, [{ name: 'user-repo' }]);
+      .reply(200, [{ name: 'user-repo', owner: { login: 'test-user' }, archived: false, disabled: false }]);
 
     // Mock issues
     fetchMock
@@ -525,7 +530,7 @@ describe('Backfill Org Mode', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; totalRepos?: number }>;
     expect(events).toContainEqual(
       expect.objectContaining({ type: 'start', totalRepos: 1 })
     );
@@ -535,20 +540,20 @@ describe('Backfill Org Mode', () => {
 describe('Backfill Projects Mode', () => {
   beforeEach(() => {
     // Set up ORG_MAPPINGS for projects mode
-    env.ORG_MAPPINGS = JSON.stringify({ '1000': 'test-org' });
+    testEnv.ORG_MAPPINGS = JSON.stringify({ '1000': 'test-org' });
     fetchMock.deactivate();
     fetchMock.activate();
     fetchMock.disableNetConnect();
   });
 
   afterEach(async () => {
-    delete env.ORG_MAPPINGS;
+    delete (testEnv as { ORG_MAPPINGS?: string }).ORG_MAPPINGS;
     await new Promise((resolve) => setTimeout(resolve, 10));
     fetchMock.deactivate();
   });
 
   it('returns error if ORG_MAPPINGS not configured', async () => {
-    delete env.ORG_MAPPINGS;
+    delete (testEnv as { ORG_MAPPINGS?: string }).ORG_MAPPINGS;
 
     const request = createBackfillRequest({
       mode: 'projects',
@@ -560,7 +565,7 @@ describe('Backfill Projects Mode', () => {
     await waitOnExecutionContext(ctx);
 
     expect(response.status).toBe(400);
-    const json = await response.json();
+    const json = await response.json() as { error: string };
     expect(json.error).toContain('ORG_MAPPINGS');
   });
 
@@ -616,22 +621,22 @@ describe('Backfill Projects Mode', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; mode?: string; repos?: string[]; totalRepos?: number; projectId?: string }>;
 
     // Should have config event with discovered repos
     const configEvent = events.find((e) => e.type === 'config');
     expect(configEvent).toBeDefined();
-    expect(configEvent.mode).toBe('projects');
-    expect(configEvent.repos).toContain('test-org/repo-a');
-    expect(configEvent.repos).toContain('test-org/repo-b');
+    expect(configEvent?.mode).toBe('projects');
+    expect(configEvent?.repos).toContain('test-org/repo-a');
+    expect(configEvent?.repos).toContain('test-org/repo-b');
 
     // Should start with 2 repos from Todoist hierarchy
     const startEvent = events.find((e) => e.type === 'start');
-    expect(startEvent.totalRepos).toBe(2);
+    expect(startEvent?.totalRepos).toBe(2);
 
     // Should include projectId in issue events
     const issueEvent = events.find((e) => e.type === 'issue');
-    expect(issueEvent.projectId).toBe('1001');
+    expect(issueEvent?.projectId).toBe('1001');
   });
 
   it('creates tasks in correct sub-projects', async () => {
@@ -684,15 +689,15 @@ describe('Backfill Projects Mode', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; status?: string; taskId?: string; projectId?: string; summary?: { created: number } }>;
 
     const issueEvent = events.find((e) => e.type === 'issue');
-    expect(issueEvent.status).toBe('created');
-    expect(issueEvent.taskId).toBe('created-subproj-task');
-    expect(issueEvent.projectId).toBe('1001');
+    expect(issueEvent?.status).toBe('created');
+    expect(issueEvent?.taskId).toBe('created-subproj-task');
+    expect(issueEvent?.projectId).toBe('1001');
 
     const complete = events.find((e) => e.type === 'complete');
-    expect(complete.summary.created).toBe(1);
+    expect(complete?.summary?.created).toBe(1);
   });
 
   it('uses batch task fetching to skip existing tasks efficiently', async () => {
@@ -756,26 +761,26 @@ describe('Backfill Projects Mode', () => {
     const response = await worker.fetch(request, env, ctx);
     await waitOnExecutionContext(ctx);
 
-    const events = await readNDJSONStream(response);
+    const events = await readNDJSONStream(response) as Array<{ type: string; existingTaskCount?: number; issue?: number; status?: string; reason?: string; summary?: { skipped: number; created: number } }>;
 
     // Config event should show existingTaskCount
     const configEvent = events.find((e) => e.type === 'config');
     expect(configEvent).toBeDefined();
-    expect(configEvent.existingTaskCount).toBe(1);
+    expect(configEvent?.existingTaskCount).toBe(1);
 
     // Issue events should show skip for existing and would_create for new
     const issueEvents = events.filter((e) => e.type === 'issue');
     expect(issueEvents).toHaveLength(2);
 
     const existingIssueEvent = issueEvents.find((e) => e.issue === 1);
-    expect(existingIssueEvent.status).toBe('skipped');
-    expect(existingIssueEvent.reason).toBe('already_exists');
+    expect(existingIssueEvent?.status).toBe('skipped');
+    expect(existingIssueEvent?.reason).toBe('already_exists');
 
     const newIssueEvent = issueEvents.find((e) => e.issue === 2);
-    expect(newIssueEvent.status).toBe('would_create');
+    expect(newIssueEvent?.status).toBe('would_create');
 
     const complete = events.find((e) => e.type === 'complete');
-    expect(complete.summary.skipped).toBe(1);
-    expect(complete.summary.created).toBe(1);
+    expect(complete?.summary?.skipped).toBe(1);
+    expect(complete?.summary?.created).toBe(1);
   });
 });

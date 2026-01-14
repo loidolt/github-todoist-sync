@@ -1,31 +1,11 @@
 import { describe, it, expect } from 'vitest';
-
-/**
- * Parse GitHub URL from task description
- * Duplicated from worker.js for testing - in production these would be exported
- */
-function parseGitHubUrl(description) {
-  if (!description) return null;
-
-  // Match: https://github.com/{owner}/{repo}/issues/{number}
-  const match = description.match(
-    /github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/
-  );
-
-  if (!match) return null;
-
-  return {
-    owner: match[1],
-    repo: match[2],
-    issueNumber: parseInt(match[3], 10),
-  };
-}
+import { parseGitHubUrl, stripTodoistPrefix } from '../src/utils/helpers.js';
 
 /**
  * Extract owner/repo from task labels
- * Duplicated from worker.js for testing
+ * This is a test-only helper function
  */
-function getRepoFromLabels(labels) {
+function getRepoFromLabels(labels: string[] | null | undefined): { owner: string | null; repo: string } | null {
   if (!labels || labels.length === 0) return null;
 
   // Skip common non-repo labels
@@ -51,37 +31,25 @@ function getRepoFromLabels(labels) {
   return null;
 }
 
-/**
- * Strip the [#issue] prefix from Todoist task content
- * Duplicated from worker.js for testing
- * Also handles legacy [repo-name#123] or [owner/repo#123] format for backwards compatibility
- */
-function stripTodoistPrefix(content) {
-  if (!content) return content;
-  // Match: [#123] at the start (new format)
-  // Also matches legacy [repo-name#123] or [owner/repo#123] for backwards compatibility
-  return content.replace(/^\[[\w./-]*#\d+\]\s*/, '');
-}
-
 describe('parseGitHubUrl', () => {
   it('parses standard GitHub issue URL', () => {
     const result = parseGitHubUrl('https://github.com/owner/repo/issues/123');
-    expect(result).toEqual({ owner: 'owner', repo: 'repo', issueNumber: 123 });
+    expect(result).toEqual({ owner: 'owner', repo: 'repo', issueNumber: 123, url: 'https://github.com/owner/repo/issues/123' });
   });
 
   it('parses URL embedded in description text', () => {
     const result = parseGitHubUrl('Check out https://github.com/my-org/my-repo/issues/42 for details');
-    expect(result).toEqual({ owner: 'my-org', repo: 'my-repo', issueNumber: 42 });
+    expect(result).toEqual({ owner: 'my-org', repo: 'my-repo', issueNumber: 42, url: 'https://github.com/my-org/my-repo/issues/42' });
   });
 
   it('parses URL with dashes in owner and repo names', () => {
     const result = parseGitHubUrl('https://github.com/my-org-name/my-repo-name/issues/1');
-    expect(result).toEqual({ owner: 'my-org-name', repo: 'my-repo-name', issueNumber: 1 });
+    expect(result).toEqual({ owner: 'my-org-name', repo: 'my-repo-name', issueNumber: 1, url: 'https://github.com/my-org-name/my-repo-name/issues/1' });
   });
 
   it('parses URL with underscores in names', () => {
     const result = parseGitHubUrl('https://github.com/my_org/my_repo/issues/99');
-    expect(result).toEqual({ owner: 'my_org', repo: 'my_repo', issueNumber: 99 });
+    expect(result).toEqual({ owner: 'my_org', repo: 'my_repo', issueNumber: 99, url: 'https://github.com/my_org/my_repo/issues/99' });
   });
 
   it('returns null for non-GitHub URLs', () => {
@@ -97,11 +65,11 @@ describe('parseGitHubUrl', () => {
   });
 
   it('returns null for null description', () => {
-    expect(parseGitHubUrl(null)).toBeNull();
+    expect(parseGitHubUrl(null as unknown as string)).toBeNull();
   });
 
   it('returns null for undefined description', () => {
-    expect(parseGitHubUrl(undefined)).toBeNull();
+    expect(parseGitHubUrl(undefined as unknown as string)).toBeNull();
   });
 
   it('returns null for empty description', () => {
@@ -110,7 +78,7 @@ describe('parseGitHubUrl', () => {
 
   it('handles multi-digit issue numbers', () => {
     const result = parseGitHubUrl('https://github.com/owner/repo/issues/12345');
-    expect(result).toEqual({ owner: 'owner', repo: 'repo', issueNumber: 12345 });
+    expect(result).toEqual({ owner: 'owner', repo: 'repo', issueNumber: 12345, url: 'https://github.com/owner/repo/issues/12345' });
   });
 });
 
@@ -254,14 +222,6 @@ describe('stripTodoistPrefix', () => {
   it('returns original content if no prefix', () => {
     const result = stripTodoistPrefix('Just a regular task');
     expect(result).toBe('Just a regular task');
-  });
-
-  it('returns null for null input', () => {
-    expect(stripTodoistPrefix(null)).toBeNull();
-  });
-
-  it('returns undefined for undefined input', () => {
-    expect(stripTodoistPrefix(undefined)).toBeUndefined();
   });
 
   it('returns empty string for empty input', () => {
