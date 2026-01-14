@@ -2578,8 +2578,8 @@ function validateBackfillRequest(body, env) {
   const { mode, repo, owner, state = 'open', dryRun = false, limit } = body;
 
   // Validate mode
-  if (!mode || !['single-repo', 'org', 'projects'].includes(mode)) {
-    return { valid: false, error: 'mode must be "single-repo", "org", or "projects"' };
+  if (!mode || !['single-repo', 'org', 'projects', 'create-mappings'].includes(mode)) {
+    return { valid: false, error: 'mode must be "single-repo", "org", "projects", or "create-mappings"' };
   }
 
   // Validate repo for single-repo mode
@@ -2587,15 +2587,15 @@ function validateBackfillRequest(body, env) {
     return { valid: false, error: 'repo is required for single-repo mode' };
   }
 
-  // For "projects" mode, owner is not required (uses ORG_MAPPINGS)
+  // For "projects" and "create-mappings" modes, owner is not required (uses ORG_MAPPINGS)
   // For other modes, owner is required
-  if (mode !== 'projects' && !owner) {
+  if (!['projects', 'create-mappings'].includes(mode) && !owner) {
     return { valid: false, error: 'owner is required for single-repo and org modes' };
   }
 
-  // For "projects" mode, ORG_MAPPINGS is required
-  if (mode === 'projects' && !env.ORG_MAPPINGS) {
-    return { valid: false, error: 'ORG_MAPPINGS env var is required for "projects" mode' };
+  // For "projects" and "create-mappings" modes, ORG_MAPPINGS is required
+  if (['projects', 'create-mappings'].includes(mode) && !env.ORG_MAPPINGS) {
+    return { valid: false, error: 'ORG_MAPPINGS env var is required for this mode' };
   }
 
   // Validate state
@@ -2864,7 +2864,69 @@ async function handleBackfill(request, env, _ctx) {
       let existingTasks = null; // Pre-fetched tasks for batch existence checking
       let sectionCache = null; // Section cache for milestone-to-section mapping
 
-      if (mode === 'single-repo') {
+      if (mode === 'create-mappings') {
+        // Special mode: Create KV mappings for existing tasks
+        // This is needed for tasks created before the KV mapping feature was added
+        const orgMappings = parseOrgMappings(env);
+        const projects = await fetchTodoistProjects(env);
+        const hierarchy = buildProjectHierarchy(projects, orgMappings);
+
+        const projectIds = Array.from(hierarchy.subProjects.values()).map((p) => p.id);
+        existingTasks = await fetchExistingTasksForProjects(env, projectIds);
+
+        await writeJSON({
+          type: 'config',
+          mode: 'create-mappings',
+          orgs: Array.from(orgMappings.values()),
+          existingTaskCount: existingTasks.size,
+        });
+
+        await writeJSON({ type: 'start', totalTasks: existingTasks.size, dryRun });
+
+        let mappingsCreated = 0;
+        let mappingsSkipped = 0;
+
+        for (const [issueUrl, taskInfo] of existingTasks) {
+          if (dryRun) {
+            await writeJSON({
+              type: 'mapping',
+              taskId: taskInfo.taskId,
+              issueUrl: issueUrl,
+              status: 'would_create',
+            });
+            mappingsCreated++;
+          } else {
+            try {
+              await env.WEBHOOK_CACHE.put(`task:${taskInfo.taskId}`, issueUrl, {
+                expirationTtl: 60 * 60 * 24 * 365, // 1 year TTL
+              });
+              await writeJSON({
+                type: 'mapping',
+                taskId: taskInfo.taskId,
+                issueUrl: issueUrl,
+                status: 'created',
+              });
+              mappingsCreated++;
+            } catch (error) {
+              await writeJSON({
+                type: 'mapping',
+                taskId: taskInfo.taskId,
+                issueUrl: issueUrl,
+                status: 'failed',
+                error: error.message,
+              });
+              mappingsSkipped++;
+            }
+          }
+        }
+
+        await writeJSON({
+          type: 'complete',
+          summary: { total: existingTasks.size, created: mappingsCreated, skipped: mappingsSkipped },
+        });
+
+        return; // Early return - don't process repos for this mode
+      } else if (mode === 'single-repo') {
         repos = [{ owner, name: repo, projectId: null }];
       } else if (mode === 'projects') {
         // Use Todoist project hierarchy to determine repos
