@@ -324,3 +324,68 @@ npx wrangler kv:namespace create "WEBHOOK_CACHE"
 4. Create a Cloudflare API token at https://dash.cloudflare.com/profile/api-tokens with:
    - Account: Workers Scripts: Edit
    - Account: Workers KV Storage: Edit
+
+## Troubleshooting
+
+### Todoist Task Completion Not Closing GitHub Issues
+
+If completing tasks in Todoist doesn't close the corresponding GitHub issues, check the following:
+
+**1. Check if KV mappings exist**
+
+The system uses KV mappings (`task:{taskId}` → GitHub URL) to resolve which GitHub issue to close. Run the `create-mappings` backfill to ensure mappings exist:
+
+```bash
+# Preview what mappings would be created
+curl -X POST https://your-worker.workers.dev/backfill \
+  -H "Authorization: Bearer $BACKFILL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "create-mappings", "dryRun": true}'
+
+# Actually create the mappings
+curl -X POST https://your-worker.workers.dev/backfill \
+  -H "Authorization: Bearer $BACKFILL_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "create-mappings"}'
+```
+
+**2. Check sync logs**
+
+Use `npm run tail` to stream live logs and look for:
+- `Could not resolve GitHub URL for completed task` - URL resolution failed for a task
+- `[CRITICAL] Failed to store KV mapping` - KV write failed during task creation
+
+**3. URL Resolution Fallback Layers**
+
+When a task is completed, the system tries 4 methods to find the GitHub URL:
+1. **KV mapping** (fastest) - looks up `task:{taskId}` in KV
+2. **Task description** - parses GitHub URL from the completed task's description
+3. **Content parsing** - extracts issue number from `[#123]` prefix + uses project hierarchy
+4. **REST API fetch** - fetches task details (doesn't work for completed tasks)
+
+If all 4 layers fail, the task is skipped but will be retried on the next sync.
+
+**4. Common causes**
+- Tasks created before the KV mapping feature was added
+- Tasks created directly in Todoist (not synced from GitHub)
+- Tasks with modified content that lost the `[#N]` prefix
+- Tasks in projects not in `ORG_MAPPINGS`
+
+### Sync State Issues
+
+If sync appears stuck or missing data:
+
+```bash
+# Check current sync state
+curl https://your-worker.workers.dev/sync-status
+
+# Force a reset of the completed tasks sync point
+# (This will re-process recent completed tasks)
+npx wrangler kv:key get --binding=WEBHOOK_CACHE "sync:state"
+```
+
+To manually reset `lastCompletedSync`:
+```bash
+# Get current state, modify lastCompletedSync to null, then put back
+npx wrangler kv:key put --binding=WEBHOOK_CACHE "sync:state" '{"lastGitHubSync":"...", "lastCompletedSync":null, ...}'
+```

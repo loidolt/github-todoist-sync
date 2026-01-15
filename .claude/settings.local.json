@@ -18,7 +18,8 @@
       "Bash(wc:*)",
       "Bash(npm run typecheck:*)",
       "Bash(npm install:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(git log:*)"
     ]
   }
 }

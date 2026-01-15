@@ -193,17 +193,35 @@ export async function performBidirectionalSync(
     const completedTasks = await pollCompletedTasks(env, state.lastCompletedSync, projectHierarchy);
     syncLogger.info(`Found ${completedTasks.length} completed tasks to process`);
 
+    // Track the latest successfully processed completed_at timestamp
+    // We only advance lastCompletedSync to the latest successful task to avoid skipping failed tasks
+    let latestSuccessfulCompletedAt: string | null = null;
+    let completedTasksProcessed = 0;
+    let completedTasksSkipped = 0;
+
     // Process completed tasks
     for (const completedTask of completedTasks) {
       try {
         const resolution = await resolveGitHubUrlForCompletedTask(env, completedTask);
-        if (!resolution) continue;
+        if (!resolution) {
+          // Could not resolve GitHub URL - this task will be retried on next sync
+          // because we won't advance lastCompletedSync past it
+          syncLogger.warn(`Could not resolve GitHub URL for completed task ${completedTask.id}`, {
+            taskId: completedTask.id,
+            content: completedTask.content,
+            hasDescription: !!completedTask.description,
+            hasFullRepo: !!completedTask._fullRepo,
+          });
+          completedTasksSkipped++;
+          continue;
+        }
 
         const { url: githubUrl, source } = resolution;
         const githubInfo = parseGitHubUrl(githubUrl);
 
         if (!githubInfo) {
           syncLogger.warn(`Invalid GitHub URL format: ${githubUrl}`, { taskId: completedTask.id });
+          completedTasksSkipped++;
           continue;
         }
 
@@ -212,6 +230,11 @@ export async function performBidirectionalSync(
           syncLogger.warn(
             `GitHub issue not found: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`
           );
+          // Issue doesn't exist - mark as processed so we don't keep retrying
+          if (!latestSuccessfulCompletedAt || completedTask.completed_at > latestSuccessfulCompletedAt) {
+            latestSuccessfulCompletedAt = completedTask.completed_at;
+          }
+          completedTasksProcessed++;
           continue;
         }
 
@@ -228,22 +251,37 @@ export async function performBidirectionalSync(
             // Ignore cleanup errors
           }
         }
+
+        // Task was successfully processed (either closed or already closed)
+        if (!latestSuccessfulCompletedAt || completedTask.completed_at > latestSuccessfulCompletedAt) {
+          latestSuccessfulCompletedAt = completedTask.completed_at;
+        }
+        completedTasksProcessed++;
       } catch (error) {
         syncLogger.error(`Error processing completed task ${completedTask.id}`, error);
         results.todoist.errors++;
         allProcessingSucceeded = false;
         state = recordError(state, 'process-completed-task', error);
+        // Don't update latestSuccessfulCompletedAt - this task will be retried
       }
+    }
+
+    if (completedTasksSkipped > 0) {
+      syncLogger.warn(`${completedTasksSkipped} completed task(s) skipped due to URL resolution failure - will retry on next sync`);
     }
 
     // Save updated sync state
     const hasIncompleteBackfill = incompleteBackfillProjects.length > 0;
     const hasErrors = results.github.errors > 0 || results.todoist.errors > 0;
 
+    // Only advance lastCompletedSync to the latest successfully processed task
+    // This ensures failed tasks will be retried on the next sync
+    const newLastCompletedSync = latestSuccessfulCompletedAt ?? state.lastCompletedSync ?? null;
+
     const newState: SyncState = {
       ...state,
       lastGitHubSync: new Date().toISOString(),
-      lastCompletedSync: new Date().toISOString(),
+      lastCompletedSync: newLastCompletedSync,
       todoistSyncToken: allProcessingSucceeded ? newSyncToken : state.todoistSyncToken,
       lastPollTime: new Date().toISOString(),
       pollCount: state.pollCount + 1,

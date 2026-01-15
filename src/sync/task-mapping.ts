@@ -81,6 +81,14 @@ export async function resolveGitHubUrlForCompletedTask(
     console.warn(`[Task ${taskId}] REST API fetch failed: ${message}`);
   }
 
-  console.warn(`[Task ${taskId}] Could not resolve GitHub URL from any source`);
+  // Log detailed diagnostic information to help debug URL resolution failures
+  console.warn(`[Task ${taskId}] Could not resolve GitHub URL from any source. Diagnostics:`, {
+    taskId,
+    content: taskContent.substring(0, 100),
+    hasDescription: !!completedTask.description,
+    descriptionPreview: completedTask.description?.substring(0, 100) ?? null,
+    fullRepo: completedTask._fullRepo ?? null,
+    contentHasIssuePrefix: /^\[#\d+\]/.test(taskContent),
+  });
   return null;
 }

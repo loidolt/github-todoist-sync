@@ -54,8 +54,15 @@ export async function createTodoistTask(
   });
 
   // Store mapping from task ID to GitHub issue URL for completed task processing
+  // This mapping is critical for closing GitHub issues when Todoist tasks are completed
   if (task?.id) {
-    await storeTaskMapping(env, task.id, issueUrl);
+    const mappingStored = await storeTaskMapping(env, task.id, issueUrl);
+    if (!mappingStored) {
+      console.error(
+        `[CRITICAL] Failed to store KV mapping for task ${task.id} -> ${issueUrl}. ` +
+          `Completing this task in Todoist may not close the GitHub issue.`
+      );
+    }
   }
 
   return task;
