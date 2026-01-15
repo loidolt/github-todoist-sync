@@ -78,14 +78,25 @@ export interface TodoistSyncTask {
 }
 
 /**
- * Todoist completed task from /completed/get_all endpoint
+ * Enriched completed task for internal processing
+ * The id is the task_id from the raw response (for consistency with other task types)
  */
-export interface TodoistCompletedTask {
+export interface CompletedTask {
+  /** Task ID (mapped from task_id in raw response) */
   id: string;
-  task_id: string;
   content: string;
+  description: string;
   project_id: string;
   completed_at: string;
+
+  /** Enriched during polling - GitHub org */
+  _githubOrg?: string;
+
+  /** Enriched during polling - repo name */
+  _repoName?: string;
+
+  /** Enriched during polling - full repo name */
+  _fullRepo?: string;
 }
 
 /**

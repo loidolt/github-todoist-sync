@@ -28,9 +28,8 @@ export function isTaskCompleted(task: TodoistTask | TodoistSyncTask): boolean {
  */
 export function stripTodoistPrefix(content: string | null | undefined): string {
   if (!content) return '';
-  // Match: [#123] at the start (new format)
-  // Also matches legacy [repo-name#123] or [owner/repo#123] for backwards compatibility
-  return content.replace(/^\[[\w./-]*#\d+\]\s*/, '');
+  // Match: [#123] at the start
+  return content.replace(/^\[#\d+\]\s*/, '');
 }
 
 /**
@@ -55,21 +54,6 @@ export function parseGitHubUrl(description: string | null | undefined): ParsedGi
     issueNumber,
     url: `https://github.com/${owner}/${repo}/issues/${issueNumber}`,
   };
-}
-
-/**
- * Extract repo name from Todoist labels
- * Used for legacy repo detection via labels
- */
-export function getRepoFromLabels(labels: string[]): string | null {
-  // Look for a label that looks like a repo name
-  // This is a legacy feature, prefer project hierarchy instead
-  for (const label of labels) {
-    if (label.includes('/') || /^[\w-]+$/.test(label)) {
-      return label;
-    }
-  }
-  return null;
 }
 
 /**

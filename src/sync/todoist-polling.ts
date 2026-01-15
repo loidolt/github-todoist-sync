@@ -1,5 +1,5 @@
 import type { Env } from '../types/env.js';
-import type { TodoistSyncTask, ProjectHierarchy } from '../types/todoist.js';
+import type { TodoistSyncTask, ProjectHierarchy, CompletedTask } from '../types/todoist.js';
 import { CONSTANTS } from '../config/constants.js';
 import { getTodoistHeaders } from '../todoist/client.js';
 
@@ -68,20 +68,6 @@ export async function pollTodoistChanges(
     newSyncToken: data.sync_token,
     fullSync: data.full_sync ?? false,
   };
-}
-
-/**
- * Completed task from the completed/get_all endpoint
- */
-export interface CompletedTask {
-  id: string;
-  content: string;
-  description: string;
-  project_id: string;
-  completed_at: string;
-  _githubOrg?: string;
-  _repoName?: string;
-  _fullRepo?: string;
 }
 
 /**

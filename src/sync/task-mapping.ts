@@ -1,9 +1,8 @@
 import type { Env } from '../types/env.js';
-import type { ParsedGitHubUrl } from '../types/github.js';
+import type { CompletedTask } from '../types/todoist.js';
+import type { Logger } from '../logging/logger.js';
 import { parseGitHubUrl } from '../utils/helpers.js';
-import { fetchTodoistTaskById } from '../todoist/tasks.js';
-import { storeTaskMapping } from '../todoist/tasks.js';
-import type { CompletedTask } from './todoist-polling.js';
+import { fetchTodoistTaskById, storeTaskMapping } from '../todoist/tasks.js';
 
 /**
  * Resolved GitHub URL with source information
@@ -23,28 +22,30 @@ export interface ResolvedGitHubUrl {
  */
 export async function resolveGitHubUrlForCompletedTask(
   env: Env,
-  completedTask: CompletedTask
+  completedTask: CompletedTask,
+  logger: Logger
 ): Promise<ResolvedGitHubUrl | null> {
   const taskId = completedTask.id;
   const taskContent = completedTask.content ?? '';
+  const taskLogger = logger.child({ taskId });
 
   // Layer 1: KV Mapping (fastest, most reliable)
   try {
     const kvUrl = await env.WEBHOOK_CACHE.get(`task:${taskId}`);
     if (kvUrl) {
-      console.log(`[Task ${taskId}] GitHub URL resolved via KV mapping`);
+      taskLogger.debug('GitHub URL resolved via KV mapping');
       return { url: kvUrl, source: 'kv' };
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.warn(`[Task ${taskId}] KV lookup failed: ${message}`);
+    taskLogger.warn(`KV lookup failed: ${message}`);
   }
 
   // Layer 2: Description from completed/get_all response
   if (completedTask.description) {
     const githubInfo = parseGitHubUrl(completedTask.description);
     if (githubInfo) {
-      console.log(`[Task ${taskId}] GitHub URL resolved via description`);
+      taskLogger.debug('GitHub URL resolved via description');
       return { url: githubInfo.url, source: 'description' };
     }
   }
@@ -54,7 +55,7 @@ export async function resolveGitHubUrlForCompletedTask(
   if (contentMatch && completedTask._fullRepo) {
     const issueNumber = contentMatch[1];
     const url = `https://github.com/${completedTask._fullRepo}/issues/${issueNumber}`;
-    console.log(`[Task ${taskId}] GitHub URL reconstructed from content + project hierarchy`);
+    taskLogger.debug('GitHub URL reconstructed from content + project hierarchy');
     return { url, source: 'content_parse' };
   }
 
@@ -64,13 +65,13 @@ export async function resolveGitHubUrlForCompletedTask(
     if (task?.description) {
       const githubInfo = parseGitHubUrl(task.description);
       if (githubInfo) {
-        console.log(`[Task ${taskId}] GitHub URL resolved via REST API fetch`);
+        taskLogger.debug('GitHub URL resolved via REST API fetch');
 
         // Opportunistically store in KV for future lookups
         try {
           await storeTaskMapping(env, taskId, githubInfo.url);
         } catch (kvError) {
-          console.warn(`[Task ${taskId}] Failed to store KV mapping:`, kvError);
+          taskLogger.warn('Failed to store KV mapping', { error: kvError });
         }
 
         return { url: githubInfo.url, source: 'rest_api' };
@@ -78,12 +79,11 @@ export async function resolveGitHubUrlForCompletedTask(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[Task ${taskId}] REST API fetch failed: ${message}`);
+    taskLogger.warn(`REST API fetch failed: ${message}`);
   }
 
   // Log detailed diagnostic information to help debug URL resolution failures
-  console.warn(`[Task ${taskId}] Could not resolve GitHub URL from any source. Diagnostics:`, {
-    taskId,
+  taskLogger.warn('Could not resolve GitHub URL from any source', {
     content: taskContent.substring(0, 100),
     hasDescription: !!completedTask.description,
     descriptionPreview: completedTask.description?.substring(0, 100) ?? null,

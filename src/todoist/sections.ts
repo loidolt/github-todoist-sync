@@ -1,5 +1,6 @@
 import type { Env } from '../types/env.js';
 import type { TodoistSection, SectionCache } from '../types/todoist.js';
+import type { Logger } from '../logging/logger.js';
 import { CONSTANTS } from '../config/constants.js';
 import { withRetry } from '../utils/retry.js';
 import { getTodoistHeaders } from './client.js';
@@ -38,7 +39,8 @@ export async function fetchSectionsForProject(
  */
 export async function fetchSectionsForProjects(
   env: Env,
-  projectIds: string[]
+  projectIds: string[],
+  logger?: Logger
 ): Promise<{ sectionCache: SectionCache; sectionIdToName: SectionIdToNameCache }> {
   const sectionCache: SectionCache = new Map();
   const sectionIdToName: SectionIdToNameCache = new Map();
@@ -58,7 +60,9 @@ export async function fetchSectionsForProjects(
       sectionCache.set(String(projectId), nameToId);
       sectionIdToName.set(String(projectId), idToName);
     } catch (error) {
-      console.error(`Failed to fetch sections for project ${projectId}:`, error);
+      if (logger) {
+        logger.error(`Failed to fetch sections for project ${projectId}`, error);
+      }
       sectionCache.set(String(projectId), new Map());
       sectionIdToName.set(String(projectId), new Map());
     }
@@ -68,7 +72,13 @@ export async function fetchSectionsForProjects(
     (sum, m) => sum + m.size,
     0
   );
-  console.log(`Fetched ${totalSections} sections across ${projectIds.length} projects`);
+
+  if (logger) {
+    logger.info(`Fetched ${totalSections} sections across ${projectIds.length} projects`, {
+      totalSections,
+      projectCount: projectIds.length,
+    });
+  }
 
   return { sectionCache, sectionIdToName };
 }
@@ -108,9 +118,11 @@ export async function getOrCreateSection(
   env: Env,
   projectId: string,
   milestoneName: string,
-  sectionCache: SectionCache
+  sectionCache: SectionCache,
+  logger?: Logger
 ): Promise<string> {
   const projectIdStr = String(projectId);
+  const sectionLogger = logger?.child({ projectId, section: milestoneName });
 
   // Check cache
   let projectSections = sectionCache.get(projectIdStr);
@@ -131,12 +143,12 @@ export async function getOrCreateSection(
       return projectSections.get(milestoneName)!;
     }
   } catch (error) {
-    console.error(`Failed to refresh sections for project ${projectId}:`, error);
+    sectionLogger?.error('Failed to refresh sections', error);
   }
 
   // Create new section
   try {
-    console.log(`Creating section "${milestoneName}" in project ${projectId}`);
+    sectionLogger?.debug('Creating new section');
     const section = await createTodoistSection(env, projectId, milestoneName);
 
     if (!projectSections) {
@@ -151,9 +163,7 @@ export async function getOrCreateSection(
 
     // Handle race condition
     if (message.includes('already exists') || message.includes('409')) {
-      console.log(
-        `Section "${milestoneName}" already exists (race condition), refreshing cache`
-      );
+      sectionLogger?.debug('Section already exists (race condition), refreshing cache');
 
       sectionCache.delete(projectIdStr);
 
@@ -168,9 +178,7 @@ export async function getOrCreateSection(
         return newProjectSections.get(milestoneName)!;
       }
 
-      console.warn(
-        `Section "${milestoneName}" not found after 409 conflict - this is unexpected`
-      );
+      sectionLogger?.warn('Section not found after 409 conflict - unexpected state');
     }
     throw error;
   }

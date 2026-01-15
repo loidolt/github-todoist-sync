@@ -1,8 +1,8 @@
 import type { Env } from '../types/env.js';
-import type { TodoistTask, TodoistSyncTask, TodoistSyncResponse } from '../types/todoist.js';
+import type { TodoistTask, TodoistSyncTask } from '../types/todoist.js';
+import type { Logger } from '../logging/logger.js';
 import { CONSTANTS } from '../config/constants.js';
-import { withRetry } from '../utils/retry.js';
-import { sleep } from '../utils/retry.js';
+import { withRetry, sleep } from '../utils/retry.js';
 import { getTodoistHeaders } from './client.js';
 import { formatTaskContent } from '../utils/helpers.js';
 
@@ -17,7 +17,8 @@ export async function createTodoistTask(
     issueUrl: string;
     projectId: string;
     sectionId?: string | null;
-  }
+  },
+  logger?: Logger
 ): Promise<TodoistTask> {
   const { title, issueNumber, issueUrl, projectId, sectionId } = options;
 
@@ -56,12 +57,14 @@ export async function createTodoistTask(
   // Store mapping from task ID to GitHub issue URL for completed task processing
   // This mapping is critical for closing GitHub issues when Todoist tasks are completed
   if (task?.id) {
-    const mappingStored = await storeTaskMapping(env, task.id, issueUrl);
+    const mappingStored = await storeTaskMapping(env, task.id, issueUrl, 2, logger);
     if (!mappingStored) {
-      console.error(
-        `[CRITICAL] Failed to store KV mapping for task ${task.id} -> ${issueUrl}. ` +
-          `Completing this task in Todoist may not close the GitHub issue.`
-      );
+      const errorMsg =
+        `Failed to store KV mapping for task ${task.id} -> ${issueUrl}. ` +
+        `Completing this task in Todoist may not close the GitHub issue.`;
+      if (logger) {
+        logger.error(errorMsg, undefined, { taskId: task.id, issueUrl });
+      }
     }
   }
 
@@ -75,7 +78,8 @@ export async function storeTaskMapping(
   env: Env,
   taskId: string,
   issueUrl: string,
-  maxRetries = 2
+  maxRetries = 2,
+  logger?: Logger
 ): Promise<boolean> {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -86,15 +90,19 @@ export async function storeTaskMapping(
       // Verify write succeeded
       const verified = await env.WEBHOOK_CACHE.get(`task:${taskId}`);
       if (verified === issueUrl) {
-        if (attempt > 0) {
-          console.log(`[Task ${taskId}] KV mapping stored successfully on attempt ${attempt + 1}`);
+        if (attempt > 0 && logger) {
+          logger.debug(`KV mapping stored successfully on retry`, { taskId, attempt: attempt + 1 });
         }
         return true;
       }
-      console.warn(`[Task ${taskId}] KV verification mismatch on attempt ${attempt + 1}`);
+      if (logger) {
+        logger.warn(`KV verification mismatch`, { taskId, attempt: attempt + 1 });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[Task ${taskId}] KV store attempt ${attempt + 1} failed: ${message}`);
+      if (logger) {
+        logger.warn(`KV store attempt failed: ${message}`, { taskId, attempt: attempt + 1 });
+      }
     }
 
     if (attempt < maxRetries) {
@@ -102,7 +110,9 @@ export async function storeTaskMapping(
     }
   }
 
-  console.error(`[Task ${taskId}] KV storage failed after ${maxRetries + 1} attempts`);
+  if (logger) {
+    logger.error(`KV storage failed after ${maxRetries + 1} attempts`, undefined, { taskId });
+  }
   return false;
 }
 
@@ -136,13 +146,19 @@ export async function findTodoistTaskByIssueUrl(
 /**
  * Check if a Todoist task already exists for the given GitHub issue URL
  */
-export async function taskExistsForIssue(env: Env, issueUrl: string): Promise<boolean> {
+export async function taskExistsForIssue(
+  env: Env,
+  issueUrl: string,
+  logger?: Logger
+): Promise<boolean> {
   try {
     const task = await findTodoistTaskByIssueUrl(env, issueUrl);
     return task !== null && task !== undefined;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`Failed to check for existing task: ${message}`);
+    if (logger) {
+      logger.error(`Failed to check for existing task: ${message}`, error);
+    }
     return false;
   }
 }
@@ -252,7 +268,8 @@ export async function reopenTodoistTask(env: Env, taskId: string): Promise<void>
  */
 export async function fetchExistingTasksForProjects(
   env: Env,
-  projectIds: string[]
+  projectIds: string[],
+  logger?: Logger
 ): Promise<Map<string, { taskId: string; projectId: string }>> {
   const existingTasks = new Map<string, { taskId: string; projectId: string }>();
 
@@ -293,8 +310,12 @@ export async function fetchExistingTasksForProjects(
     }
   }
 
-  console.log(
-    `Found ${existingTasks.size} existing tasks with GitHub URLs across ${projectIds.length} projects`
-  );
+  if (logger) {
+    logger.info(
+      `Found ${existingTasks.size} existing tasks with GitHub URLs across ${projectIds.length} projects`,
+      { taskCount: existingTasks.size, projectCount: projectIds.length }
+    );
+  }
+
   return existingTasks;
 }

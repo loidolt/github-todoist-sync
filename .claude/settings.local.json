@@ -19,7 +19,9 @@
       "Bash(npm run typecheck:*)",
       "Bash(npm install:*)",
       "Bash(npx tsc:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)"
     ]
   }
 }

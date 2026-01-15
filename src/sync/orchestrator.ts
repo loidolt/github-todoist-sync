@@ -67,7 +67,7 @@ export async function performBidirectionalSync(
     // Pre-fetch sections for milestone mapping
     const currentProjectIds = Array.from(projectHierarchy.subProjects.keys());
     syncLogger.info('Fetching sections for milestone mapping...');
-    const { sectionCache, sectionIdToName } = await fetchSectionsForProjects(env, currentProjectIds);
+    const { sectionCache, sectionIdToName } = await fetchSectionsForProjects(env, currentProjectIds, syncLogger);
 
     // Initialize milestone cache (populated lazily per-repo)
     const milestoneCache: MilestoneCache = new Map();
@@ -144,7 +144,7 @@ export async function performBidirectionalSync(
     // Process GitHub -> Todoist sync
     for (const issue of githubIssues) {
       try {
-        const result = await syncIssueToTodoist(env, issue, sectionCache);
+        const result = await syncIssueToTodoist(env, issue, sectionCache, syncLogger);
         results.github.processed++;
         if (result.action === 'created') results.github.created++;
         else if (result.action === 'updated') results.github.updated++;
@@ -174,7 +174,7 @@ export async function performBidirectionalSync(
     // Process Todoist -> GitHub sync
     for (const task of todoistTasks) {
       try {
-        const result = await syncTaskToGitHub(env, task, sectionIdToName, milestoneCache);
+        const result = await syncTaskToGitHub(env, task, sectionIdToName, milestoneCache, syncLogger);
         results.todoist.processed++;
         if (result.action === 'completed') results.todoist.closed++;
         else if (result.action === 'reopened') results.todoist.reopened++;
@@ -202,7 +202,7 @@ export async function performBidirectionalSync(
     // Process completed tasks
     for (const completedTask of completedTasks) {
       try {
-        const resolution = await resolveGitHubUrlForCompletedTask(env, completedTask);
+        const resolution = await resolveGitHubUrlForCompletedTask(env, completedTask, syncLogger);
         if (!resolution) {
           // Could not resolve GitHub URL - this task will be retried on next sync
           // because we won't advance lastCompletedSync past it

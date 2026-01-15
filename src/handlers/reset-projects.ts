@@ -2,6 +2,7 @@ import type { Env } from '../types/env.js';
 import type { SyncState } from '../types/sync-state.js';
 import { verifyBackfillAuth } from '../utils/auth.js';
 import { jsonResponse } from '../utils/helpers.js';
+import { createLogger, LogLevel } from '../logging/logger.js';
 import { loadSyncState, saveSyncState } from '../state/sync-state.js';
 import { parseOrgMappings, fetchTodoistProjects, buildProjectHierarchy } from '../todoist/projects.js';
 
@@ -10,6 +11,8 @@ import { parseOrgMappings, fetchTodoistProjects, buildProjectHierarchy } from '.
  * Resets known projects to trigger auto-backfill on next sync
  */
 export async function handleResetProjects(request: Request, env: Env): Promise<Response> {
+  const logger = createLogger(LogLevel.INFO);
+
   // Authenticate
   if (!verifyBackfillAuth(request, env)) {
     return new Response('Unauthorized', { status: 401 });
@@ -47,13 +50,13 @@ export async function handleResetProjects(request: Request, env: Env): Promise<R
 
   try {
     // Load current sync state
-    const state = await loadSyncState(env);
+    const state = await loadSyncState(env, logger);
     const currentKnownProjects = state.knownProjectIds ?? [];
 
     // Fetch current Todoist project hierarchy
-    const orgMappings = parseOrgMappings(env);
+    const orgMappings = parseOrgMappings(env, logger);
     const projects = await fetchTodoistProjects(env);
-    const hierarchy = buildProjectHierarchy(projects, orgMappings);
+    const hierarchy = buildProjectHierarchy(projects, orgMappings, logger);
     const currentProjectIds = Array.from(hierarchy.subProjects.keys());
 
     let resetProjectIds: string[];
@@ -97,10 +100,11 @@ export async function handleResetProjects(request: Request, env: Env): Promise<R
       forceBackfillProjectIds: resetProjectIds,
     };
 
-    await saveSyncState(env, newState);
+    await saveSyncState(env, newState, logger);
 
-    console.log(
-      `Reset ${resetProjectIds.length} project(s) for auto-backfill. Remaining known: ${remainingKnownProjects.length}`
+    logger.info(
+      `Reset ${resetProjectIds.length} project(s) for auto-backfill`,
+      { resetCount: resetProjectIds.length, remainingCount: remainingKnownProjects.length }
     );
 
     return jsonResponse({
@@ -111,7 +115,7 @@ export async function handleResetProjects(request: Request, env: Env): Promise<R
       nextSyncWillBackfill: resetProjectIds.length,
     });
   } catch (error) {
-    console.error('Failed to reset projects:', error);
+    logger.error('Failed to reset projects', error);
     return jsonResponse({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
   }
 }

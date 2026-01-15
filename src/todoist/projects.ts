@@ -17,16 +17,12 @@ import { getTodoistHeaders } from './client.js';
  * Returns Map of projectId -> githubOrg
  *
  * @param env - Environment with ORG_MAPPINGS variable
- * @param logger - Optional logger for structured logging
+ * @param logger - Logger for structured logging
  * @returns Map of Todoist project ID to GitHub org name
  */
-export function parseOrgMappings(env: Env, logger?: Logger): Map<string, string> {
+export function parseOrgMappings(env: Env, logger: Logger): Map<string, string> {
   if (!env.ORG_MAPPINGS) {
-    if (logger) {
-      logger.warn('No ORG_MAPPINGS configured');
-    } else {
-      console.warn('No ORG_MAPPINGS configured');
-    }
+    logger.warn('No ORG_MAPPINGS configured');
     return new Map();
   }
 
@@ -58,18 +54,10 @@ export function parseOrgMappings(env: Env, logger?: Logger): Map<string, string>
     }
 
     const map = new Map(Object.entries(mappings));
-    if (logger) {
-      logger.info(`Loaded ${map.size} org mapping(s)`, { count: map.size });
-    } else {
-      console.log(`Loaded ${map.size} org mapping(s)`);
-    }
+    logger.info(`Loaded ${map.size} org mapping(s)`, { count: map.size });
     return map;
   } catch (error) {
-    if (logger) {
-      logger.error('Failed to parse ORG_MAPPINGS', error);
-    } else {
-      console.error('Failed to parse ORG_MAPPINGS:', error);
-    }
+    logger.error('Failed to parse ORG_MAPPINGS', error);
     return new Map();
   }
 }
@@ -144,13 +132,13 @@ export async function fetchTodoistProjects(env: Env): Promise<TodoistProject[]> 
  *
  * @param projects - Array of Todoist projects from the Sync API
  * @param orgMappings - Map of Todoist project ID to GitHub org name
- * @param logger - Optional logger for structured logging
+ * @param logger - Logger for structured logging
  * @returns ProjectHierarchy with parent projects, sub-projects, and repo-to-project mapping
  */
 export function buildProjectHierarchy(
   projects: TodoistProject[],
   orgMappings: Map<string, string>,
-  logger?: Logger
+  logger: Logger
 ): ProjectHierarchy {
   const parentProjects = new Map<string, ParentProject>();
   const subProjects = new Map<string, SubProject>();
@@ -196,16 +184,10 @@ export function buildProjectHierarchy(
     }
   }
 
-  if (logger) {
-    logger.info(
-      `Built hierarchy: ${parentProjects.size} parent(s), ${subProjects.size} sub-project(s)`,
-      { parentCount: parentProjects.size, subProjectCount: subProjects.size }
-    );
-  } else {
-    console.log(
-      `Built hierarchy: ${parentProjects.size} parent(s), ${subProjects.size} sub-project(s)`
-    );
-  }
+  logger.info(
+    `Built hierarchy: ${parentProjects.size} parent(s), ${subProjects.size} sub-project(s)`,
+    { parentCount: parentProjects.size, subProjectCount: subProjects.size }
+  );
 
   return { parentProjects, subProjects, repoToProject };
 }

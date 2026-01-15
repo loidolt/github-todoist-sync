@@ -1,36 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseGitHubUrl, stripTodoistPrefix } from '../src/utils/helpers.js';
 
-/**
- * Extract owner/repo from task labels
- * This is a test-only helper function
- */
-function getRepoFromLabels(labels: string[] | null | undefined): { owner: string | null; repo: string } | null {
-  if (!labels || labels.length === 0) return null;
-
-  // Skip common non-repo labels
-  const skipLabels = ['github', 'sync', 'todo', 'task', 'urgent', 'high', 'medium', 'low'];
-
-  // First pass: look for explicit owner/repo labels
-  // Supports dashes, underscores, and dots in names (e.g., my_org/repo.js)
-  for (const label of labels) {
-    const match = label.match(/^([\w.-]+)\/([\w.-]+)$/);
-    if (match) {
-      return { owner: match[1], repo: match[2] };
-    }
-  }
-
-  // Second pass: look for simple repo names
-  for (const label of labels) {
-    const labelLower = label.toLowerCase();
-    if (!skipLabels.includes(labelLower) && /^[\w.-]+$/.test(label)) {
-      return { owner: null, repo: label };
-    }
-  }
-
-  return null;
-}
-
 describe('parseGitHubUrl', () => {
   it('parses standard GitHub issue URL', () => {
     const result = parseGitHubUrl('https://github.com/owner/repo/issues/123');
@@ -82,140 +52,25 @@ describe('parseGitHubUrl', () => {
   });
 });
 
-describe('getRepoFromLabels', () => {
-  it('parses owner/repo format label', () => {
-    const result = getRepoFromLabels(['my-org/my-repo']);
-    expect(result).toEqual({ owner: 'my-org', repo: 'my-repo' });
-  });
-
-  it('parses simple repo name label', () => {
-    const result = getRepoFromLabels(['my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('prefers owner/repo format over simple repo name', () => {
-    const result = getRepoFromLabels(['simple-repo', 'my-org/specific-repo']);
-    expect(result).toEqual({ owner: 'my-org', repo: 'specific-repo' });
-  });
-
-  it('skips common non-repo labels (github)', () => {
-    const result = getRepoFromLabels(['github', 'my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('skips common non-repo labels (sync)', () => {
-    const result = getRepoFromLabels(['sync', 'my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('skips common non-repo labels (todo)', () => {
-    const result = getRepoFromLabels(['todo', 'my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('skips common non-repo labels (urgent)', () => {
-    const result = getRepoFromLabels(['urgent', 'my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('skips priority labels', () => {
-    const result = getRepoFromLabels(['high', 'medium', 'low', 'my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('is case-insensitive for skip labels', () => {
-    const result = getRepoFromLabels(['GITHUB', 'URGENT', 'my-repo']);
-    expect(result).toEqual({ owner: null, repo: 'my-repo' });
-  });
-
-  it('returns null for empty labels array', () => {
-    expect(getRepoFromLabels([])).toBeNull();
-  });
-
-  it('returns null for null labels', () => {
-    expect(getRepoFromLabels(null)).toBeNull();
-  });
-
-  it('returns null for undefined labels', () => {
-    expect(getRepoFromLabels(undefined)).toBeNull();
-  });
-
-  it('returns null when only skip labels are present', () => {
-    expect(getRepoFromLabels(['github', 'sync', 'urgent'])).toBeNull();
-  });
-
-  it('handles labels with underscores', () => {
-    const result = getRepoFromLabels(['my_repo']);
-    expect(result).toEqual({ owner: null, repo: 'my_repo' });
-  });
-
-  it('handles owner/repo with underscores', () => {
-    const result = getRepoFromLabels(['my_org/my_repo']);
-    expect(result).toEqual({ owner: 'my_org', repo: 'my_repo' });
-  });
-
-  it('returns first valid owner/repo when multiple present', () => {
-    const result = getRepoFromLabels(['org1/repo1', 'org2/repo2']);
-    expect(result).toEqual({ owner: 'org1', repo: 'repo1' });
-  });
-
-  it('handles owner/repo with dots', () => {
-    const result = getRepoFromLabels(['my-org/repo.js']);
-    expect(result).toEqual({ owner: 'my-org', repo: 'repo.js' });
-  });
-
-  it('handles simple repo name with dots', () => {
-    const result = getRepoFromLabels(['my-app.io']);
-    expect(result).toEqual({ owner: null, repo: 'my-app.io' });
-  });
-
-  it('handles complex names with dots, dashes, and underscores', () => {
-    const result = getRepoFromLabels(['my_org.io/my-repo_v2.js']);
-    expect(result).toEqual({ owner: 'my_org.io', repo: 'my-repo_v2.js' });
-  });
-});
-
 describe('stripTodoistPrefix', () => {
-  // New format tests [#N]
-  it('strips new [#N] prefix format', () => {
+  it('strips [#N] prefix format', () => {
     const result = stripTodoistPrefix('[#123] Fix the bug');
     expect(result).toBe('Fix the bug');
   });
 
-  it('strips new format with multi-digit issue numbers', () => {
+  it('strips prefix with multi-digit issue numbers', () => {
     const result = stripTodoistPrefix('[#12345] Large issue number');
     expect(result).toBe('Large issue number');
   });
 
-  it('strips new format without trailing space', () => {
+  it('strips prefix without trailing space', () => {
     const result = stripTodoistPrefix('[#1]No space after');
     expect(result).toBe('No space after');
   });
 
-  it('strips new format with multiple spaces', () => {
+  it('strips prefix with multiple spaces', () => {
     const result = stripTodoistPrefix('[#1]   Multiple spaces');
     expect(result).toBe('Multiple spaces');
-  });
-
-  // Legacy format tests (backwards compatibility)
-  it('strips legacy repo#issue prefix', () => {
-    const result = stripTodoistPrefix('[my-repo#123] Fix the bug');
-    expect(result).toBe('Fix the bug');
-  });
-
-  it('strips legacy owner/repo#issue prefix', () => {
-    const result = stripTodoistPrefix('[my-org/my-repo#456] Add feature');
-    expect(result).toBe('Add feature');
-  });
-
-  it('strips legacy prefix with underscores and dots', () => {
-    const result = stripTodoistPrefix('[my_org.io/repo.js#789] Update docs');
-    expect(result).toBe('Update docs');
-  });
-
-  it('strips legacy format without trailing space', () => {
-    const result = stripTodoistPrefix('[repo#1]No space after');
-    expect(result).toBe('No space after');
   });
 
   // Edge cases
@@ -233,7 +88,7 @@ describe('stripTodoistPrefix', () => {
     expect(result).toBe('See [#123] for details');
   });
 
-  it('does not strip legacy prefix in middle of string', () => {
+  it('does not strip other bracket patterns', () => {
     const result = stripTodoistPrefix('See [repo#123] for details');
     expect(result).toBe('See [repo#123] for details');
   });

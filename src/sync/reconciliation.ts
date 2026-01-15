@@ -29,7 +29,7 @@
  */
 
 import type { Env } from '../types/env.js';
-import type { GitHubIssue, ParsedGitHubUrl } from '../types/github.js';
+import type { GitHubIssue } from '../types/github.js';
 import type { TodoistSyncTask, SectionCache } from '../types/todoist.js';
 import type { SyncAction } from '../types/api.js';
 import type { MilestoneCache } from '../github/milestones.js';
@@ -63,20 +63,21 @@ import { getMilestoneNumber, updateGitHubIssueMilestone } from '../github/milest
  *
  * @param env - Environment with API tokens
  * @param issue - GitHub issue to sync (enriched with project info)
- * @param sectionCache - Optional cache for section name -> ID mapping
- * @param logger - Optional logger for structured logging
+ * @param sectionCache - Cache for section name -> ID mapping
+ * @param logger - Logger for structured logging
  * @returns Action taken during sync
  */
 export async function syncIssueToTodoist(
   env: Env,
   issue: GitHubIssue,
-  sectionCache: SectionCache | null = null,
-  logger?: Logger
+  sectionCache: SectionCache,
+  logger: Logger
 ): Promise<SyncAction> {
   const issueUrl = issue.html_url;
   const repoFullName = issue._repoFullName ?? '';
   const projectId = issue._todoistProjectId;
   const issueRef = `${repoFullName}#${issue.number}`;
+  const issueLogger = logger.child({ issue: issueRef, projectId });
 
   // Cannot sync without knowing which project to use
   if (!projectId) {
@@ -88,16 +89,11 @@ export async function syncIssueToTodoist(
   let targetSectionId: string | null = null;
   const milestoneName = issue.milestone?.title;
 
-  if (milestoneName && sectionCache) {
+  if (milestoneName) {
     try {
       targetSectionId = await getOrCreateSection(env, projectId, milestoneName, sectionCache);
     } catch (error) {
-      const msg = `Failed to get/create section for milestone "${milestoneName}"`;
-      if (logger) {
-        logger.error(msg, error, { milestone: milestoneName, projectId });
-      } else {
-        console.error(`${msg}:`, error);
-      }
+      issueLogger.error(`Failed to get/create section for milestone "${milestoneName}"`, error, { milestone: milestoneName });
       // Continue without section - non-fatal error
     }
   }
@@ -109,12 +105,7 @@ export async function syncIssueToTodoist(
     // No task exists for this issue - create if issue is open
     if (issue.state === 'open') {
       const sectionInfo = targetSectionId ? ` in section "${milestoneName}"` : '';
-      const msg = `Creating task for open issue: ${issueRef} in project ${projectId}${sectionInfo}`;
-      if (logger) {
-        logger.info(msg, { issue: issueRef, projectId, section: milestoneName ?? null });
-      } else {
-        console.log(msg);
-      }
+      issueLogger.info(`Creating task for open issue${sectionInfo}`, { section: milestoneName ?? null });
       await createTodoistTask(env, {
         title: issue.title,
         issueNumber: issue.number,
@@ -133,24 +124,14 @@ export async function syncIssueToTodoist(
 
   // Case: Issue closed but task still open -> complete the task
   if (issue.state === 'closed' && !taskCompleted) {
-    const msg = `Completing task for closed issue: ${issueRef}`;
-    if (logger) {
-      logger.info(msg, { issue: issueRef, taskId: task.id });
-    } else {
-      console.log(msg);
-    }
+    issueLogger.info('Completing task for closed issue', { taskId: task.id });
     await completeTodoistTask(env, task.id);
     return { action: 'completed', issue: issueRef };
   }
 
   // Case: Issue reopened but task still completed -> reopen the task
   if (issue.state === 'open' && taskCompleted) {
-    const msg = `Reopening task for reopened issue: ${issueRef}`;
-    if (logger) {
-      logger.info(msg, { issue: issueRef, taskId: task.id });
-    } else {
-      console.log(msg);
-    }
+    issueLogger.info('Reopening task for reopened issue', { taskId: task.id });
     await reopenTodoistTask(env, task.id);
     return { action: 'reopened', issue: issueRef };
   }
@@ -160,12 +141,7 @@ export async function syncIssueToTodoist(
   let updated = false;
 
   if (task.content !== expectedTitle) {
-    const msg = `Updating task title for issue: ${issueRef}`;
-    if (logger) {
-      logger.debug(msg, { issue: issueRef, taskId: task.id, oldTitle: task.content, newTitle: expectedTitle });
-    } else {
-      console.log(msg);
-    }
+    issueLogger.debug('Updating task title', { taskId: task.id, oldTitle: task.content, newTitle: expectedTitle });
     await updateTodoistTask(env, task.id, { content: expectedTitle });
     updated = true;
   }
@@ -175,14 +151,9 @@ export async function syncIssueToTodoist(
   const currentSectionId = task.section_id ? String(task.section_id) : null;
   const targetSectionIdStr = targetSectionId ? String(targetSectionId) : null;
 
-  if (currentSectionId !== targetSectionIdStr && sectionCache) {
+  if (currentSectionId !== targetSectionIdStr) {
     const sectionInfo = milestoneName ? ` to section "${milestoneName}"` : ' (removing from section)';
-    const msg = `Moving task for issue ${issueRef}${sectionInfo}`;
-    if (logger) {
-      logger.info(msg, { issue: issueRef, taskId: task.id, fromSection: currentSectionId, toSection: targetSectionIdStr });
-    } else {
-      console.log(msg);
-    }
+    issueLogger.info(`Moving task${sectionInfo}`, { taskId: task.id, fromSection: currentSectionId, toSection: targetSectionIdStr });
     await updateTodoistTaskSection(env, task.id, targetSectionId);
     return { action: 'section_updated', issue: issueRef, section: milestoneName ?? null };
   }
@@ -217,18 +188,20 @@ export async function syncIssueToTodoist(
  *
  * @param env - Environment with API tokens
  * @param task - Todoist task to sync (enriched with repo info)
- * @param sectionIdToName - Optional reverse mapping of section ID to name
- * @param milestoneCache - Optional cache for milestone name to number
- * @param logger - Optional logger for structured logging
+ * @param sectionIdToName - Reverse mapping of section ID to name
+ * @param milestoneCache - Cache for milestone name to number
+ * @param logger - Logger for structured logging
  * @returns Action taken during sync
  */
 export async function syncTaskToGitHub(
   env: Env,
   task: TodoistSyncTask,
-  sectionIdToName: SectionIdToNameCache | null = null,
-  milestoneCache: MilestoneCache | null = null,
-  logger?: Logger
+  sectionIdToName: SectionIdToNameCache,
+  milestoneCache: MilestoneCache,
+  logger: Logger
 ): Promise<SyncAction> {
+  const taskLogger = logger.child({ taskId: task.id });
+
   // First check if task has GitHub URL (was created from GitHub issue)
   // The URL is stored in the task description
   const githubInfo = parseGitHubUrl(task.description);
@@ -236,15 +209,11 @@ export async function syncTaskToGitHub(
   if (githubInfo) {
     // Scenario A: Task was created from GitHub issue - sync state back
     const issueRef = `${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`;
+    const issueLogger = taskLogger.child({ issue: issueRef });
 
     const issue = await getGitHubIssue(env, githubInfo.owner, githubInfo.repo, githubInfo.issueNumber);
     if (!issue) {
-      const msg = `GitHub issue not found: ${issueRef}`;
-      if (logger) {
-        logger.warn(msg, { issue: issueRef, taskId: task.id });
-      } else {
-        console.warn(msg);
-      }
+      issueLogger.warn('GitHub issue not found');
       return { action: 'skipped', reason: 'issue_not_found', taskId: task.id };
     }
 
@@ -252,88 +221,67 @@ export async function syncTaskToGitHub(
 
     // Case: Task completed in Todoist -> close the GitHub issue
     if (taskCompleted && issue.state === 'open') {
-      const msg = `Closing issue for completed task: ${issueRef}`;
-      if (logger) {
-        logger.info(msg, { issue: issueRef, taskId: task.id });
-      } else {
-        console.log(msg);
-      }
+      issueLogger.info('Closing issue for completed task');
       await closeGitHubIssue(env, githubInfo.owner, githubInfo.repo, githubInfo.issueNumber);
       return { action: 'completed', issue: issueRef };
     }
 
     // Case: Task reopened in Todoist -> reopen the GitHub issue
     if (!taskCompleted && issue.state === 'closed') {
-      const msg = `Reopening issue for uncompleted task: ${issueRef}`;
-      if (logger) {
-        logger.info(msg, { issue: issueRef, taskId: task.id });
-      } else {
-        console.log(msg);
-      }
+      issueLogger.info('Reopening issue for uncompleted task');
       await reopenGitHubIssue(env, githubInfo.owner, githubInfo.repo, githubInfo.issueNumber);
       return { action: 'reopened', issue: issueRef };
     }
 
     // Check if section changed and needs to sync milestone
     // Section name in Todoist maps to milestone title in GitHub
-    if (sectionIdToName && milestoneCache) {
-      const projectIdStr = String(task.project_id);
-      const taskSectionId = task.section_id ? String(task.section_id) : null;
+    const projectIdStr = String(task.project_id);
+    const taskSectionId = task.section_id ? String(task.section_id) : null;
 
-      // Look up section name from ID
-      const projectSectionIdToName = sectionIdToName.get(projectIdStr);
-      const taskSectionName =
-        taskSectionId && projectSectionIdToName
-          ? projectSectionIdToName.get(taskSectionId) ?? null
+    // Look up section name from ID
+    const projectSectionIdToName = sectionIdToName.get(projectIdStr);
+    const taskSectionName =
+      taskSectionId && projectSectionIdToName
+        ? projectSectionIdToName.get(taskSectionId) ?? null
+        : null;
+
+    const currentMilestoneName = issue.milestone?.title ?? null;
+
+    // If section doesn't match current milestone, update the milestone
+    if (taskSectionName !== currentMilestoneName) {
+      try {
+        // Get milestone number (milestones must exist in GitHub - we don't create them)
+        const milestoneNumber = taskSectionName
+          ? await getMilestoneNumber(env, githubInfo.owner, githubInfo.repo, taskSectionName, milestoneCache)
           : null;
 
-      const currentMilestoneName = issue.milestone?.title ?? null;
-
-      // If section doesn't match current milestone, update the milestone
-      if (taskSectionName !== currentMilestoneName) {
-        try {
-          // Get milestone number (milestones must exist in GitHub - we don't create them)
-          const milestoneNumber = taskSectionName
-            ? await getMilestoneNumber(env, githubInfo.owner, githubInfo.repo, taskSectionName, milestoneCache)
-            : null;
-
-          // Only update if we found a milestone or we're removing it (taskSectionName is null)
-          if (milestoneNumber !== null || taskSectionName === null) {
-            const msg = `Updating milestone for issue ${issueRef}: "${currentMilestoneName}" → "${taskSectionName}"`;
-            if (logger) {
-              logger.info(msg, { issue: issueRef, fromMilestone: currentMilestoneName, toMilestone: taskSectionName });
-            } else {
-              console.log(msg);
-            }
-            await updateGitHubIssueMilestone(
-              env,
-              githubInfo.owner,
-              githubInfo.repo,
-              githubInfo.issueNumber,
-              milestoneNumber
-            );
-            return {
-              action: 'section_updated',
-              issue: issueRef,
-              section: taskSectionName,
-            };
-          } else if (taskSectionName) {
-            // Milestone doesn't exist in GitHub - warn but don't fail
-            const msg = `Cannot find milestone "${taskSectionName}" in ${githubInfo.owner}/${githubInfo.repo} - skipping milestone update`;
-            if (logger) {
-              logger.warn(msg, { milestone: taskSectionName, repo: `${githubInfo.owner}/${githubInfo.repo}` });
-            } else {
-              console.warn(msg);
-            }
-          }
-        } catch (error) {
-          const msg = `Failed to update milestone for issue ${issueRef}`;
-          if (logger) {
-            logger.error(msg, error, { issue: issueRef });
-          } else {
-            console.error(`${msg}:`, error);
-          }
+        // Only update if we found a milestone or we're removing it (taskSectionName is null)
+        if (milestoneNumber !== null || taskSectionName === null) {
+          issueLogger.info(`Updating milestone: "${currentMilestoneName}" → "${taskSectionName}"`, {
+            fromMilestone: currentMilestoneName,
+            toMilestone: taskSectionName,
+          });
+          await updateGitHubIssueMilestone(
+            env,
+            githubInfo.owner,
+            githubInfo.repo,
+            githubInfo.issueNumber,
+            milestoneNumber
+          );
+          return {
+            action: 'section_updated',
+            issue: issueRef,
+            section: taskSectionName,
+          };
+        } else if (taskSectionName) {
+          // Milestone doesn't exist in GitHub - warn but don't fail
+          issueLogger.warn(`Cannot find milestone "${taskSectionName}" - skipping milestone update`, {
+            milestone: taskSectionName,
+            repo: `${githubInfo.owner}/${githubInfo.repo}`,
+          });
         }
+      } catch (error) {
+        issueLogger.error('Failed to update milestone', error);
       }
     }
 
@@ -346,6 +294,8 @@ export async function syncTaskToGitHub(
     return { action: 'skipped', reason: 'no_repo_info', taskId: task.id };
   }
 
+  const repoLogger = taskLogger.child({ repo: task._fullRepo });
+
   // Skip completed tasks - don't create closed issues
   // This prevents creating issues for tasks that were already completed
   if (isTaskCompleted(task)) {
@@ -357,7 +307,7 @@ export async function syncTaskToGitHub(
   let milestoneNumber: number | null = null;
   let milestoneName: string | null = null;
 
-  if (sectionIdToName && milestoneCache && task.section_id) {
+  if (task.section_id) {
     const projectIdStr = String(task.project_id);
     const taskSectionId = String(task.section_id);
     const projectSectionIdToName = sectionIdToName.get(projectIdStr);
@@ -374,20 +324,12 @@ export async function syncTaskToGitHub(
             milestoneCache
           );
           if (!milestoneNumber) {
-            const msg = `Milestone "${milestoneName}" not found in ${task._fullRepo} - creating issue without milestone`;
-            if (logger) {
-              logger.warn(msg, { milestone: milestoneName, repo: task._fullRepo });
-            } else {
-              console.warn(msg);
-            }
+            repoLogger.warn(`Milestone "${milestoneName}" not found - creating issue without milestone`, {
+              milestone: milestoneName,
+            });
           }
         } catch (error) {
-          const msg = `Failed to get milestone for ${task._fullRepo}`;
-          if (logger) {
-            logger.error(msg, error, { repo: task._fullRepo, milestone: milestoneName });
-          } else {
-            console.error(`${msg}:`, error);
-          }
+          repoLogger.error('Failed to get milestone', error, { milestone: milestoneName });
         }
       }
     }
@@ -397,12 +339,7 @@ export async function syncTaskToGitHub(
   // Strip any existing [#N] prefix from task content to get clean title
   const issueTitle = stripTodoistPrefix(task.content);
   const milestoneInfo = milestoneNumber ? ` with milestone "${milestoneName}"` : '';
-  const msg = `Creating GitHub issue for task: ${task._fullRepo} - ${issueTitle}${milestoneInfo}`;
-  if (logger) {
-    logger.info(msg, { repo: task._fullRepo, taskId: task.id, milestone: milestoneName });
-  } else {
-    console.log(msg);
-  }
+  repoLogger.info(`Creating GitHub issue: ${issueTitle}${milestoneInfo}`, { milestone: milestoneName });
 
   try {
     const issue = await createGitHubIssue(
@@ -422,22 +359,12 @@ export async function syncTaskToGitHub(
       description: issue.html_url,
     });
 
-    const successMsg = `Created GitHub issue: ${issue.html_url}`;
-    if (logger) {
-      logger.info(successMsg, { issueUrl: issue.html_url, taskId: task.id });
-    } else {
-      console.log(successMsg);
-    }
+    repoLogger.info(`Created GitHub issue: ${issue.html_url}`, { issueUrl: issue.html_url });
 
     return { action: 'created', issue: issue.html_url };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const errMsg = `Failed to create GitHub issue for task ${task.id}`;
-    if (logger) {
-      logger.error(errMsg, error, { taskId: task.id, repo: task._fullRepo });
-    } else {
-      console.error(`${errMsg}:`, error);
-    }
+    repoLogger.error('Failed to create GitHub issue', error);
     return { action: 'error', error: message, taskId: task.id };
   }
 }

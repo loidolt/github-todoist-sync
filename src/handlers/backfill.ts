@@ -4,6 +4,7 @@ import type { SectionCache } from '../types/todoist.js';
 import { CONSTANTS } from '../config/constants.js';
 import { verifyBackfillAuth, validateBackfillRequest, type BackfillParams } from '../utils/auth.js';
 import { jsonResponse } from '../utils/helpers.js';
+import { createLogger, LogLevel, type Logger } from '../logging/logger.js';
 import { parseOrgMappings, fetchTodoistProjects, buildProjectHierarchy } from '../todoist/projects.js';
 import { fetchExistingTasksForProjects, taskExistsForIssue, createTodoistTask } from '../todoist/tasks.js';
 import { fetchSectionsForProjects, getOrCreateSection } from '../todoist/sections.js';
@@ -21,7 +22,8 @@ async function processBackfillIssue(
   dryRun: boolean,
   projectId: string | null,
   existingTasks: Map<string, { taskId: string; projectId: string }> | null,
-  sectionCache: SectionCache | null
+  sectionCache: SectionCache | null,
+  logger: Logger
 ): Promise<{
   status: 'created' | 'would_create' | 'skipped' | 'failed';
   reason?: string;
@@ -34,7 +36,7 @@ async function processBackfillIssue(
     // Check existence
     const exists = existingTasks
       ? existingTasks.has(issue.html_url)
-      : await taskExistsForIssue(env, issue.html_url);
+      : await taskExistsForIssue(env, issue.html_url, logger);
 
     if (exists) {
       return { status: 'skipped', reason: 'already_exists' };
@@ -54,9 +56,9 @@ async function processBackfillIssue(
     const milestoneName = issue.milestone?.title;
     if (milestoneName && sectionCache) {
       try {
-        sectionId = await getOrCreateSection(env, projectId, milestoneName, sectionCache);
+        sectionId = await getOrCreateSection(env, projectId, milestoneName, sectionCache, logger);
       } catch (error) {
-        console.error(`Failed to get/create section for milestone "${milestoneName}":`, error);
+        logger.error(`Failed to get/create section for milestone "${milestoneName}"`, error);
       }
     }
 
@@ -66,11 +68,11 @@ async function processBackfillIssue(
       issueUrl: issue.html_url,
       projectId,
       sectionId,
-    });
+    }, logger);
 
     return { status: 'created', taskId: task.id, section: milestoneName ?? null };
   } catch (error) {
-    console.error(`Failed to process issue ${repoFullName}#${issue.number}:`, error);
+    logger.error(`Failed to process issue ${repoFullName}#${issue.number}`, error);
     return { status: 'failed', error: error instanceof Error ? error.message : 'Unknown error' };
   }
 }
@@ -84,6 +86,8 @@ export async function handleBackfill(
   env: Env,
   _ctx: ExecutionContext
 ): Promise<Response> {
+  const logger = createLogger(LogLevel.INFO);
+
   // Authenticate
   if (!verifyBackfillAuth(request, env)) {
     return new Response('Unauthorized', { status: 401 });
@@ -126,12 +130,12 @@ export async function handleBackfill(
 
       if (mode === 'create-mappings') {
         // Special mode: Create KV mappings for existing tasks
-        const orgMappings = parseOrgMappings(env);
+        const orgMappings = parseOrgMappings(env, logger);
         const projects = await fetchTodoistProjects(env);
-        const hierarchy = buildProjectHierarchy(projects, orgMappings);
+        const hierarchy = buildProjectHierarchy(projects, orgMappings, logger);
 
         const projectIds = Array.from(hierarchy.subProjects.values()).map((p) => p.id);
-        existingTasks = await fetchExistingTasksForProjects(env, projectIds);
+        existingTasks = await fetchExistingTasksForProjects(env, projectIds, logger);
 
         await writeJSON({
           type: 'config',
@@ -188,9 +192,9 @@ export async function handleBackfill(
       } else if (mode === 'single-repo') {
         repos = [{ owner: owner!, name: repo!, projectId: null }];
       } else if (mode === 'projects') {
-        const orgMappings = parseOrgMappings(env);
+        const orgMappings = parseOrgMappings(env, logger);
         const projects = await fetchTodoistProjects(env);
-        const hierarchy = buildProjectHierarchy(projects, orgMappings);
+        const hierarchy = buildProjectHierarchy(projects, orgMappings, logger);
 
         repos = Array.from(hierarchy.subProjects.values()).map((p) => ({
           owner: p.githubOrg,
@@ -199,9 +203,9 @@ export async function handleBackfill(
         }));
 
         const projectIds = repos.map((r) => r.projectId!);
-        existingTasks = await fetchExistingTasksForProjects(env, projectIds);
+        existingTasks = await fetchExistingTasksForProjects(env, projectIds, logger);
 
-        const sectionResult = await fetchSectionsForProjects(env, projectIds);
+        const sectionResult = await fetchSectionsForProjects(env, projectIds, logger);
         sectionCache = sectionResult.sectionCache;
 
         await writeJSON({
@@ -246,7 +250,8 @@ export async function handleBackfill(
               dryRun,
               repoInfo.projectId,
               existingTasks,
-              sectionCache
+              sectionCache,
+              logger
             );
 
             summary.total++;
@@ -275,7 +280,7 @@ export async function handleBackfill(
             projectId: repoInfo.projectId,
           });
         } catch (error) {
-          console.error(`Failed to process repo ${repoFullName}:`, error);
+          logger.error(`Failed to process repo ${repoFullName}`, error);
           await writeJSON({
             type: 'repo_error',
             repo: repoFullName,
@@ -286,7 +291,7 @@ export async function handleBackfill(
 
       await writeJSON({ type: 'complete', summary });
     } catch (error) {
-      console.error('Backfill failed:', error);
+      logger.error('Backfill failed', error);
       await writeJSON({
         type: 'error',
         error: error instanceof Error ? error.message : 'Unknown error',
