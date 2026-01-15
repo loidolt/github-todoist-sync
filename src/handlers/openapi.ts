@@ -127,6 +127,72 @@ export function getOpenApiSpec(baseUrl: string): object {
           },
         },
       },
+      '/trigger-sync': {
+        post: {
+          summary: 'Manually trigger sync',
+          description: 'Manually triggers a full bidirectional sync cycle. Useful for debugging or immediate sync needs. Requires Bearer authentication.',
+          tags: ['Admin'],
+          security: [{ bearerAuth: [] }],
+          responses: {
+            200: {
+              description: 'Sync completed successfully',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      success: { type: 'boolean', example: true },
+                      duration: { type: 'integer', description: 'Duration in milliseconds', example: 1234 },
+                      results: {
+                        type: 'object',
+                        properties: {
+                          github: {
+                            type: 'object',
+                            properties: {
+                              processed: { type: 'integer' },
+                              created: { type: 'integer' },
+                              updated: { type: 'integer' },
+                              completed: { type: 'integer' },
+                              reopened: { type: 'integer' },
+                              sectionUpdated: { type: 'integer' },
+                              errors: { type: 'integer' },
+                            },
+                          },
+                          todoist: {
+                            type: 'object',
+                            properties: {
+                              processed: { type: 'integer' },
+                              closed: { type: 'integer', description: 'GitHub issues closed from completed Todoist tasks' },
+                              reopened: { type: 'integer' },
+                              createdIssues: { type: 'integer' },
+                              milestoneUpdated: { type: 'integer' },
+                              errors: { type: 'integer' },
+                            },
+                          },
+                          autoBackfill: {
+                            type: 'object',
+                            properties: {
+                              newProjects: { type: 'integer' },
+                              issues: { type: 'integer' },
+                              created: { type: 'integer' },
+                              skipped: { type: 'integer' },
+                              errors: { type: 'integer' },
+                            },
+                          },
+                        },
+                      },
+                      error: { type: 'string', description: 'Error message if sync failed' },
+                      warning: { type: 'string', description: 'Warning message if applicable' },
+                    },
+                  },
+                },
+              },
+            },
+            401: { description: 'Unauthorized - invalid or missing Bearer token' },
+            500: { description: 'Sync failed with error' },
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {

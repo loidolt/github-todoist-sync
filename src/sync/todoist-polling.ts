@@ -93,23 +93,18 @@ export async function pollCompletedTasks(
   since: string | null,
   projectHierarchy: ProjectHierarchy
 ): Promise<CompletedTask[]> {
+  // NOTE: The Todoist `since` parameter appears to be broken/unreliable
+  // So we fetch recent completed tasks and filter client-side by timestamp
   const params = new URLSearchParams({
     annotate_items: 'true',
     limit: '200',
   });
 
-  if (since) {
-    const sinceDate = new Date(since);
-    const formattedSince = sinceDate.toISOString().replace('Z', '').split('.')[0];
-    params.set('since', formattedSince ?? '');
-  }
+  const url = `${CONSTANTS.TODOIST_API_BASE}/sync/v9/completed/get_all?${params}`;
 
-  const response = await fetch(
-    `${CONSTANTS.TODOIST_API_BASE}/sync/v9/completed/get_all?${params}`,
-    {
-      headers: getTodoistHeaders(env),
-    }
-  );
+  const response = await fetch(url, {
+    headers: getTodoistHeaders(env),
+  });
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -128,8 +123,17 @@ export async function pollCompletedTasks(
   const data = (await response.json()) as { items?: CompletedItemResponse[] };
   const { subProjects } = projectHierarchy;
 
+  const rawItems = data.items ?? [];
+
+  // Filter by completion time (client-side since Todoist's since param is unreliable)
+  const sinceTime = since ? new Date(since).getTime() : 0;
+  const timeFilteredItems = rawItems.filter((item) => {
+    const completedTime = new Date(item.completed_at).getTime();
+    return completedTime > sinceTime;
+  });
+
   // Filter to only tasks from sub-projects we're tracking
-  const completedTasks = (data.items ?? []).filter((item) => {
+  const completedTasks = timeFilteredItems.filter((item) => {
     const projectId = String(item.project_id);
     return subProjects.has(projectId);
   });

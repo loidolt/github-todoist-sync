@@ -5,6 +5,7 @@ import { handleHealth } from './handlers/health.js';
 import { handleSyncStatus } from './handlers/sync-status.js';
 import { handleResetProjects } from './handlers/reset-projects.js';
 import { handleBackfill } from './handlers/backfill.js';
+import { handleTriggerSync } from './handlers/trigger-sync.js';
 
 /**
  * Route HTTP requests to appropriate handlers
@@ -30,6 +31,11 @@ export async function handleRequest(
   // POST /backfill
   if (method === 'POST' && pathname === '/backfill') {
     return handleBackfill(request, env, ctx);
+  }
+
+  // POST /trigger-sync - manually trigger sync for debugging
+  if (method === 'POST' && pathname === '/trigger-sync') {
+    return handleTriggerSync(request, env);
   }
 
   // GET /health
