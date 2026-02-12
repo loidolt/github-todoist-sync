@@ -68,7 +68,7 @@ export function parseOrgMappings(env: Env, logger: Logger): Map<string, string> 
  */
 export async function fetchTodoistProjects(env: Env): Promise<TodoistProject[]> {
   return withRetry(async () => {
-    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/sync/v9/sync`, {
+    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
       method: 'POST',
       headers: {
         ...getTodoistHeaders(env),

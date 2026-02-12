@@ -64,7 +64,7 @@ export async function batchCreateTodoistTasks(
     });
 
     try {
-      const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/sync/v9/sync`, {
+      const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
         method: 'POST',
         headers: {
           ...getTodoistHeaders(env),
@@ -154,7 +154,7 @@ export async function batchCreateSections(
   }));
 
   try {
-    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/sync/v9/sync`, {
+    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
       method: 'POST',
       headers: {
         ...getTodoistHeaders(env),

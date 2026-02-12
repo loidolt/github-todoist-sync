@@ -19,7 +19,7 @@ export async function fetchSectionsForProject(
 ): Promise<TodoistSection[]> {
   return withRetry(async () => {
     const response = await fetch(
-      `${CONSTANTS.TODOIST_API_BASE}/rest/v2/sections?project_id=${projectId}`,
+      `${CONSTANTS.TODOIST_API_BASE}/api/v1/sections?project_id=${projectId}`,
       {
         headers: getTodoistHeaders(env),
       }
@@ -92,7 +92,7 @@ export async function createTodoistSection(
   name: string
 ): Promise<TodoistSection> {
   return withRetry(async () => {
-    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/rest/v2/sections`, {
+    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sections`, {
       method: 'POST',
       headers: {
         ...getTodoistHeaders(env),
@@ -194,7 +194,7 @@ export async function updateTodoistTaskSection(
 ): Promise<void> {
   return withRetry(async () => {
     const response = await fetch(
-      `${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks/${taskId}`,
+      `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/${taskId}`,
       {
         method: 'POST',
         headers: {

@@ -41,7 +41,7 @@ async function readNDJSONStream(response: Response): Promise<unknown[]> {
 // Helper to mock Todoist sections endpoint (required for milestone sync)
 function mockTodoistSections(fm: typeof fetchMock, projectId: string, sections: unknown[] = []): void {
   fm.get('https://api.todoist.com')
-    .intercept({ path: `/rest/v2/sections?project_id=${projectId}` })
+    .intercept({ path: `/api/v1/sections?project_id=${projectId}` })
     .reply(200, sections);
 }
 
@@ -231,7 +231,7 @@ describe('Backfill Single Repo', () => {
     // Mock Todoist - no existing tasks
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     const request = createBackfillRequest({
@@ -275,7 +275,7 @@ describe('Backfill Single Repo', () => {
     // Mock Todoist - task already exists
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, [
         {
           id: 'existing-task',
@@ -325,7 +325,7 @@ describe('Backfill Single Repo', () => {
     // Mock Todoist - no existing tasks
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     const request = createBackfillRequest({
@@ -373,7 +373,7 @@ describe('Backfill Single Repo', () => {
 
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     const request = createBackfillRequest({
@@ -413,7 +413,7 @@ describe('Backfill Single Repo', () => {
 
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     const request = createBackfillRequest({
@@ -483,7 +483,7 @@ describe('Backfill Org Mode', () => {
     // Mock Todoist
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     const request = createBackfillRequest({
@@ -573,7 +573,7 @@ describe('Backfill Projects Mode', () => {
     // Mock Todoist projects (first sync call)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         projects: [
           { id: '1000', name: 'Test Org Issues', parent_id: null },
@@ -590,7 +590,7 @@ describe('Backfill Projects Mode', () => {
     // Mock Todoist batch task fetch (second sync call for existing tasks)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'batch-token' });
 
     // Mock GitHub issues for repo-a
@@ -643,7 +643,7 @@ describe('Backfill Projects Mode', () => {
     // Mock Todoist projects (first sync call)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         projects: [
           { id: '1000', name: 'Test Org Issues', parent_id: null },
@@ -658,7 +658,7 @@ describe('Backfill Projects Mode', () => {
     // Mock Todoist batch task fetch (second sync call - no existing tasks)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'batch-token' });
 
     // Mock GitHub issues - use unique repo name
@@ -677,7 +677,7 @@ describe('Backfill Projects Mode', () => {
     // Mock Todoist task creation - use unique task id
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .intercept({ method: 'POST', path: '/api/v1/tasks' })
       .reply(201, { id: 'created-subproj-task', content: '[#99] Subproject Test Issue' });
 
     const request = createBackfillRequest({
@@ -704,7 +704,7 @@ describe('Backfill Projects Mode', () => {
     // Mock Todoist projects (first sync call)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         projects: [
           { id: '1000', name: 'Test Org Issues', parent_id: null },
@@ -720,7 +720,7 @@ describe('Backfill Projects Mode', () => {
     // This returns existing tasks with GitHub URLs
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         items: [
           {

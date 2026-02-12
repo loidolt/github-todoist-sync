@@ -20,7 +20,7 @@ export async function todoistFetch<T>(
   options: RequestInit = {}
 ): Promise<T> {
   return withRetry(async () => {
-    const url = path.startsWith('http') ? path : `${CONSTANTS.TODOIST_API_BASE}/rest/v2${path}`;
+    const url = path.startsWith('http') ? path : `${CONSTANTS.TODOIST_API_BASE}/api/v1${path}`;
 
     const response = await fetch(url, {
       ...options,
@@ -48,7 +48,7 @@ export async function todoistFetchVoid(
   options: RequestInit = {}
 ): Promise<void> {
   return withRetry(async () => {
-    const url = path.startsWith('http') ? path : `${CONSTANTS.TODOIST_API_BASE}/rest/v2${path}`;
+    const url = path.startsWith('http') ? path : `${CONSTANTS.TODOIST_API_BASE}/api/v1${path}`;
 
     const response = await fetch(url, {
       ...options,
@@ -73,7 +73,7 @@ export async function todoistSyncFetch<T>(
   body: Record<string, unknown>
 ): Promise<T> {
   return withRetry(async () => {
-    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/sync/v9/sync`, {
+    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
       method: 'POST',
       headers: {
         ...getTodoistHeaders(env),
