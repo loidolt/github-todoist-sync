@@ -137,7 +137,9 @@ export async function findTodoistTaskByIssueUrl(
       throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
     }
 
-    const tasks = (await response.json()) as TodoistTask[];
+    // v1 API returns paginated response: { results: [...], next_cursor: ... }
+    const data = (await response.json()) as { results?: TodoistTask[] } | TodoistTask[];
+    const tasks = Array.isArray(data) ? data : (data.results ?? []);
     // Double-check the description match since filter is fuzzy
     return tasks.find((t) => t.description?.includes(issueUrl));
   });

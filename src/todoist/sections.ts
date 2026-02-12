@@ -30,7 +30,12 @@ export async function fetchSectionsForProject(
       throw new Error(`Todoist API error: ${response.status} - ${errorText}`);
     }
 
-    return response.json() as Promise<TodoistSection[]>;
+    // v1 API returns paginated response: { results: [...], next_cursor: ... }
+    const data = (await response.json()) as { results?: TodoistSection[] } | TodoistSection[];
+    if (Array.isArray(data)) {
+      return data;
+    }
+    return data.results ?? [];
   });
 }
 
