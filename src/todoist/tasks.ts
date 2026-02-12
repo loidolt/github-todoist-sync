@@ -298,11 +298,13 @@ export async function fetchExistingTasksForProjects(
     if (!projectIdSet.has(taskProjectId)) continue;
 
     if (task.description) {
-      const githubUrlMatch = task.description.match(
-        /https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+/
+      // Match issue URLs from any platform (GitHub, Gitea, etc.)
+      // Pattern: https://{host}/{owner}/{repo}/issues/{number}
+      const issueUrlMatch = task.description.match(
+        /https?:\/\/[^/]+\/[^/]+\/[^/]+\/issues\/\d+/
       );
-      if (githubUrlMatch) {
-        existingTasks.set(githubUrlMatch[0], {
+      if (issueUrlMatch) {
+        existingTasks.set(issueUrlMatch[0], {
           taskId: String(task.id),
           projectId: taskProjectId,
         });
@@ -312,7 +314,7 @@ export async function fetchExistingTasksForProjects(
 
   if (logger) {
     logger.info(
-      `Found ${existingTasks.size} existing tasks with GitHub URLs across ${projectIds.length} projects`,
+      `Found ${existingTasks.size} existing tasks with issue URLs across ${projectIds.length} projects`,
       { taskCount: existingTasks.size, projectCount: projectIds.length }
     );
   }

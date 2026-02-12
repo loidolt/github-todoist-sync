@@ -1,8 +1,8 @@
 import type { Env } from '../types/env.js';
 import type { ProjectHierarchy, SectionCache } from '../types/todoist.js';
+import type { ProviderRegistry } from '../providers/types.js';
 import type { Logger } from '../logging/logger.js';
 import { CONSTANTS } from '../config/constants.js';
-import { fetchGitHubIssues } from '../github/issues.js';
 import { fetchExistingTasksForProjects } from '../todoist/tasks.js';
 import { batchCreateTodoistTasks, batchCreateSections, type BatchTaskData } from '../todoist/batch.js';
 
@@ -32,22 +32,15 @@ interface BackfillTask extends BatchTaskData {
  * Called during scheduled sync when new Todoist sub-projects are found
  *
  * Uses batched API calls to minimize subrequest count:
- * 1. Fetch all issues first (GitHub API calls are unavoidable per-repo)
+ * 1. Fetch all issues first (provider API calls are unavoidable per-repo)
  * 2. Batch create all needed sections in one Sync API call
  * 3. Batch create all tasks in one Sync API call
- *
- * @param env - Environment with API tokens
- * @param newProjectIds - Todoist project IDs to backfill
- * @param projectHierarchy - Project hierarchy with org/repo mappings
- * @param results - Results object to update with backfill progress
- * @param logger - Logger instance for structured logging
- * @param sectionCache - Optional section cache for milestone mapping
- * @returns List of project IDs that still need more backfilling (hit the limit)
  */
 export async function performAutoBackfill(
   env: Env,
   newProjectIds: string[],
   projectHierarchy: ProjectHierarchy,
+  providerRegistry: ProviderRegistry,
   results: AutoBackfillResults,
   logger: Logger,
   sectionCache: SectionCache | null = null
@@ -62,9 +55,10 @@ export async function performAutoBackfill(
     .map((id) => {
       const project = subProjects.get(id)!;
       return {
-        owner: project.githubOrg,
+        owner: project.org,
         name: project.repoName,
         projectId: project.id,
+        parentId: project.parentId,
         fullRepo: project.fullRepo,
       };
     });
@@ -86,7 +80,7 @@ export async function performAutoBackfill(
   );
 
   backfillLogger.info(
-    `Found ${existingTasks.size} existing tasks with GitHub URLs across ${reposToBackfill.length} projects`,
+    `Found ${existingTasks.size} existing tasks with issue URLs across ${reposToBackfill.length} projects`,
     { existingTaskCount: existingTasks.size, projectCount: reposToBackfill.length }
   );
 
@@ -98,11 +92,21 @@ export async function performAutoBackfill(
 
   for (const repo of reposToBackfill) {
     const repoLogger = backfillLogger.child({ repo: repo.fullRepo });
+
+    const provider = providerRegistry.get(repo.parentId);
+    if (!provider) {
+      repoLogger.warn('No provider found for parent project', { parentId: repo.parentId });
+      results.errors++;
+      results.repoErrors?.push({ repo: repo.fullRepo, error: 'No provider configured' });
+      incompleteProjects.add(repo.projectId);
+      continue;
+    }
+
     try {
       repoLogger.debug(`Scanning issues for: ${repo.fullRepo}`);
       let repoHasMoreIssues = false;
 
-      for await (const issue of fetchGitHubIssues(env, repo.owner, repo.name, { state: 'open' })) {
+      for await (const issue of provider.fetchIssues(repo.owner, repo.name, { state: 'open' })) {
         results.issues++;
 
         // Check if task already exists

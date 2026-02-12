@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Cloudflare Worker that provides bidirectional sync between GitHub issues and Todoist tasks using polling-based sync (no webhooks required):
-- GitHub issue opened → creates Todoist task in corresponding sub-project
-- GitHub issue closed → completes Todoist task
-- GitHub issue reopened → reopens Todoist task
-- Todoist task created (in sub-project) → creates GitHub issue in corresponding repo
-- Todoist task completed → closes GitHub issue
-- Todoist task uncompleted → reopens GitHub issue
+A Cloudflare Worker that provides bidirectional sync between GitHub/Gitea issues and Todoist tasks using polling-based sync (no webhooks required):
+- Issue opened → creates Todoist task in corresponding sub-project
+- Issue closed → completes Todoist task
+- Issue reopened → reopens Todoist task
+- Todoist task created (in sub-project) → creates issue in corresponding repo
+- Todoist task completed → closes linked issue
+- Todoist task uncompleted → reopens linked issue
+
+Supports both GitHub and Gitea instances. The platform is determined per-project via `ORG_MAPPINGS`.
 
 Sync runs every 15 minutes via Cloudflare Cron Triggers.
 
@@ -32,15 +34,16 @@ npx wrangler kv:namespace create "WEBHOOK_CACHE"
 # Add secrets
 npx wrangler secret put GITHUB_TOKEN
 npx wrangler secret put TODOIST_API_TOKEN
-npx wrangler secret put ORG_MAPPINGS  # JSON mapping Todoist project IDs to GitHub orgs
+npx wrangler secret put ORG_MAPPINGS  # JSON mapping Todoist project IDs to orgs
 npx wrangler secret put BACKFILL_SECRET  # Optional: for backfill endpoint auth
+npx wrangler secret put GITEA_TOKENS  # Optional: JSON mapping Gitea instance URLs to API tokens
 ```
 
 ### ORG_MAPPINGS Configuration
 
-The `ORG_MAPPINGS` environment variable defines which Todoist projects map to which GitHub organizations. The sync uses Todoist's project hierarchy to determine which repos to sync:
+The `ORG_MAPPINGS` environment variable defines which Todoist projects map to which organizations. The sync uses Todoist's project hierarchy to determine which repos to sync:
 
-- **Parent projects** map to GitHub organizations
+- **Parent projects** map to organizations (GitHub or Gitea)
 - **Sub-projects** map to repository names
 
 **Example Todoist structure:**
@@ -50,12 +53,14 @@ Issues (parent project)           → maps to "my-org" GitHub org
 ├── web-app                      → syncs with my-org/web-app
 └── docs                         → syncs with my-org/docs
 
-Client Projects (parent project)  → maps to "client-org" GitHub org
-├── project-a                    → syncs with client-org/project-a
-└── project-b                    → syncs with client-org/project-b
+Gitea Projects (parent project)   → maps to "my-gitea-org" on Gitea instance
+├── service-a                    → syncs with my-gitea-org/service-a
+└── service-b                    → syncs with my-gitea-org/service-b
 ```
 
-**ORG_MAPPINGS format** (JSON object mapping Todoist parent project ID → GitHub org):
+**ORG_MAPPINGS format** (backward compatible):
+
+String values map to GitHub orgs (existing behavior, no changes needed):
 ```json
 {
   "2365501087": "my-org",
@@ -63,11 +68,41 @@ Client Projects (parent project)  → maps to "client-org" GitHub org
 }
 ```
 
+Object values support Gitea (and other platforms):
+```json
+{
+  "2365501087": "my-org",
+  "2365501088": {
+    "platform": "gitea",
+    "org": "my-gitea-org",
+    "instanceUrl": "https://gitea.example.com"
+  }
+}
+```
+
 Set as an environment variable:
 ```bash
 npx wrangler secret put ORG_MAPPINGS
-# Enter: {"2365501087": "my-org", "2365501088": "client-org"}
+# Enter: {"2365501087": "my-org", "2365501088": {"platform": "gitea", "org": "my-gitea-org", "instanceUrl": "https://gitea.example.com"}}
 ```
+
+### GITEA_TOKENS Configuration
+
+When using Gitea instances in `ORG_MAPPINGS`, you must provide API tokens via the `GITEA_TOKENS` environment variable. This is a JSON object mapping Gitea instance URLs to their API tokens:
+
+```json
+{
+  "https://gitea.example.com": "your-gitea-api-token"
+}
+```
+
+Set as an environment variable:
+```bash
+npx wrangler secret put GITEA_TOKENS
+# Enter: {"https://gitea.example.com": "your-gitea-api-token"}
+```
+
+Multiple Gitea instances are supported — each with their own token. Only required when `ORG_MAPPINGS` contains Gitea entries.
 
 **Finding Todoist Project IDs:**
 1. Open Todoist web app
@@ -132,10 +167,11 @@ curl https://your-worker.workers.dev/sync-status
 ### Features
 
 - **Full bidirectional sync**: Create, close, and reopen issues/tasks from either platform
-- **Project-based repo routing**: Uses Todoist project hierarchy to determine GitHub org/repo
-  - Parent projects map to GitHub organizations
+- **Multi-platform support**: GitHub and Gitea instances, configured per-project
+- **Project-based repo routing**: Uses Todoist project hierarchy to determine org/repo
+  - Parent projects map to organizations (GitHub or Gitea)
   - Sub-projects map to repository names
-  - Supports multiple organizations via `ORG_MAPPINGS`
+  - Supports multiple organizations and platforms via `ORG_MAPPINGS`
 - **Milestone/Section sync**: GitHub milestones map bidirectionally to Todoist sections
   - Issues with milestones → tasks placed in sections named after the milestone
   - Tasks in sections → issues created with matching milestone
@@ -287,9 +323,10 @@ curl -X POST https://your-worker.workers.dev/reset-projects \
 ## Testing
 
 Tests are located in the `test/` directory:
-- `test/parsing.test.js` - URL and label parsing tests
-- `test/backfill.test.js` - Backfill endpoint tests
-- `test/polling.test.js` - Polling sync, scheduled handler, and project hierarchy tests
+- `test/parsing.test.ts` - URL and label parsing tests
+- `test/backfill.test.ts` - Backfill endpoint tests
+- `test/polling.test.ts` - Polling sync, scheduled handler, and project hierarchy tests
+- `test/providers.test.ts` - Provider abstraction tests (GitHub, Gitea, factory, URL parsing)
 
 Run tests with `npm test`.
 
@@ -312,8 +349,9 @@ Deployments are handled via GitHub Actions (`.github/workflows/ci.yml`):
 | `KV_NAMESPACE_ID` | The KV namespace ID for sync state |
 | `WORKER_GITHUB_TOKEN` | GitHub PAT for creating/updating issues |
 | `TODOIST_API_TOKEN` | Todoist API token |
-| `ORG_MAPPINGS` | JSON mapping Todoist parent project IDs to GitHub orgs (e.g., `{"123": "my-org"}`) |
+| `ORG_MAPPINGS` | JSON mapping Todoist parent project IDs to orgs (e.g., `{"123": "my-org"}` or `{"123": {"platform": "gitea", "org": "...", "instanceUrl": "..."}}`) |
 | `BACKFILL_SECRET` | Secret for backfill endpoint auth |
+| `GITEA_TOKENS` | (Optional) JSON mapping Gitea instance URLs to API tokens |
 
 3. Create the KV namespace (if not already created):
 ```bash

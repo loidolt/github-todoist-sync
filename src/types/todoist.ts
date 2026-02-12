@@ -1,3 +1,5 @@
+import type { Platform } from '../providers/types.js';
+
 /**
  * Todoist project from the API
  */
@@ -39,14 +41,17 @@ export interface TodoistTask {
     timezone?: string;
   } | null;
 
-  /** Enriched during polling - GitHub org */
-  _githubOrg?: string;
+  /** Enriched during polling - org name (GitHub org or Gitea org) */
+  _org?: string;
 
   /** Enriched during polling - repo name */
   _repoName?: string;
 
   /** Enriched during polling - full repo name */
   _fullRepo?: string;
+
+  /** Enriched during polling - web base URL for issue URL construction */
+  _webBaseUrl?: string;
 }
 
 /**
@@ -67,14 +72,17 @@ export interface TodoistSyncTask {
     timezone?: string;
   } | null;
 
-  /** Enriched during polling - GitHub org */
-  _githubOrg?: string;
+  /** Enriched during polling - org name (GitHub org or Gitea org) */
+  _org?: string;
 
   /** Enriched during polling - repo name */
   _repoName?: string;
 
   /** Enriched during polling - full repo name */
   _fullRepo?: string;
+
+  /** Enriched during polling - web base URL for issue URL construction */
+  _webBaseUrl?: string;
 }
 
 /**
@@ -89,35 +97,42 @@ export interface CompletedTask {
   project_id: string;
   completed_at: string;
 
-  /** Enriched during polling - GitHub org */
-  _githubOrg?: string;
+  /** Enriched during polling - org name (GitHub org or Gitea org) */
+  _org?: string;
 
   /** Enriched during polling - repo name */
   _repoName?: string;
 
   /** Enriched during polling - full repo name */
   _fullRepo?: string;
+
+  /** Enriched during polling - web base URL for issue URL construction */
+  _webBaseUrl?: string;
 }
 
 /**
- * Parent project with GitHub org mapping
+ * Parent project with org mapping
  */
 export interface ParentProject {
   id: string;
   name: string;
-  githubOrg: string;
+  org: string;
+  platform: Platform;
+  instanceUrl: string;
 }
 
 /**
- * Sub-project representing a GitHub repo
+ * Sub-project representing a repo
  */
 export interface SubProject {
   id: string;
   name: string;
   parentId: string;
-  githubOrg: string;
+  org: string;
   repoName: string;
   fullRepo: string;
+  platform: Platform;
+  webBaseUrl: string;
 }
 
 /**

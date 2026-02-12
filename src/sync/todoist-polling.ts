@@ -57,9 +57,10 @@ export async function pollTodoistChanges(
     const projectId = String(task.project_id);
     const subProject = subProjects.get(projectId);
     if (subProject) {
-      task._githubOrg = subProject.githubOrg;
+      task._org = subProject.org;
       task._repoName = subProject.repoName;
       task._fullRepo = subProject.fullRepo;
+      task._webBaseUrl = subProject.webBaseUrl;
     }
   }
 
@@ -136,9 +137,10 @@ export async function pollCompletedTasks(
         completedItem.item_object?.description ?? completedItem.item?.description ?? '',
       project_id: completedItem.project_id,
       completed_at: completedItem.completed_at,
-      _githubOrg: subProject?.githubOrg,
+      _org: subProject?.org,
       _repoName: subProject?.repoName,
       _fullRepo: subProject?.fullRepo,
+      _webBaseUrl: subProject?.webBaseUrl,
     };
   });
 }

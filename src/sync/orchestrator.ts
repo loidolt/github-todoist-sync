@@ -4,12 +4,12 @@ import { Logger } from '../logging/logger.js';
 import { loadSyncState, saveSyncState, recordError, clearErrors } from '../state/sync-state.js';
 import { parseOrgMappings, fetchTodoistProjects, buildProjectHierarchy } from '../todoist/projects.js';
 import { fetchSectionsForProjects } from '../todoist/sections.js';
-import { parseGitHubUrl } from '../utils/helpers.js';
-import { getGitHubIssue, closeGitHubIssue } from '../github/issues.js';
-import { pollGitHubChanges } from './github-polling.js';
+import { createProviderRegistry } from '../providers/factory.js';
+import { parseIssueUrlFromAnyProvider } from '../providers/url-parsing.js';
+import { pollIssueChanges } from './issue-polling.js';
 import { pollTodoistChanges, pollCompletedTasks } from './todoist-polling.js';
 import { syncIssueToTodoist, syncTaskToGitHub } from './reconciliation.js';
-import { resolveGitHubUrlForCompletedTask } from './task-mapping.js';
+import { resolveIssueUrlForCompletedTask } from './task-mapping.js';
 import { performAutoBackfill, type AutoBackfillResults } from './auto-backfill.js';
 import type { MilestoneCache } from '../github/milestones.js';
 
@@ -25,7 +25,7 @@ export interface SyncResult {
 }
 
 /**
- * Perform bidirectional sync between GitHub and Todoist
+ * Perform bidirectional sync between issue providers and Todoist
  * Called by the scheduled handler
  */
 export async function performBidirectionalSync(
@@ -53,6 +53,9 @@ export async function performBidirectionalSync(
       syncLogger.warn('No org mappings configured, skipping sync');
       return { success: false, duration: Date.now() - startTime, results, error: 'No ORG_MAPPINGS configured' };
     }
+
+    // Create provider registry (one provider per platform+instance)
+    const providerRegistry = createProviderRegistry(orgMappings, env);
 
     // Fetch Todoist projects and build hierarchy
     syncLogger.info('Fetching Todoist project hierarchy...');
@@ -93,6 +96,7 @@ export async function performBidirectionalSync(
         env,
         forceBackfillProjectIds,
         projectHierarchy,
+        providerRegistry,
         results.autoBackfill,
         syncLogger,
         sectionCache
@@ -106,6 +110,7 @@ export async function performBidirectionalSync(
         env,
         newProjectIds,
         projectHierarchy,
+        providerRegistry,
         results.autoBackfill,
         syncLogger,
         sectionCache
@@ -124,25 +129,25 @@ export async function performBidirectionalSync(
       syncLogger.debug(`No new projects detected (tracking ${knownProjectIds.size} project(s))`);
     }
 
-    // Poll GitHub for changes
-    syncLogger.info(`Polling GitHub for issues updated since: ${state.lastGitHubSync ?? 'beginning'}`);
-    const githubPollResult = await pollGitHubChanges(env, state.lastGitHubSync, projectHierarchy, syncLogger);
-    const githubIssues = githubPollResult.issues;
-    syncLogger.info(`Found ${githubIssues.length} GitHub issues to process`, {
-      issueCount: githubIssues.length,
-      successfulRepos: githubPollResult.successfulRepos,
-      failedRepos: githubPollResult.failedRepos,
+    // Poll issue providers for changes
+    syncLogger.info(`Polling issue providers for issues updated since: ${state.lastGitHubSync ?? 'beginning'}`);
+    const issuePollResult = await pollIssueChanges(state.lastGitHubSync, projectHierarchy, providerRegistry, syncLogger);
+    const providerIssues = issuePollResult.issues;
+    syncLogger.info(`Found ${providerIssues.length} issues to process`, {
+      issueCount: providerIssues.length,
+      successfulRepos: issuePollResult.successfulRepos,
+      failedRepos: issuePollResult.failedRepos,
     });
 
     // Record any repo polling errors
-    if (githubPollResult.repoErrors.length > 0) {
-      for (const repoError of githubPollResult.repoErrors) {
-        state = recordError(state, `github-polling:${repoError.repo}`, new Error(repoError.error));
+    if (issuePollResult.repoErrors.length > 0) {
+      for (const repoError of issuePollResult.repoErrors) {
+        state = recordError(state, `issue-polling:${repoError.repo}`, new Error(repoError.error));
       }
     }
 
-    // Process GitHub -> Todoist sync
-    for (const issue of githubIssues) {
+    // Process issue -> Todoist sync
+    for (const issue of providerIssues) {
       try {
         const result = await syncIssueToTodoist(env, issue, sectionCache, syncLogger);
         results.github.processed++;
@@ -171,10 +176,10 @@ export async function performBidirectionalSync(
 
     let allProcessingSucceeded = true;
 
-    // Process Todoist -> GitHub sync
+    // Process Todoist -> issue provider sync
     for (const task of todoistTasks) {
       try {
-        const result = await syncTaskToGitHub(env, task, sectionIdToName, milestoneCache, syncLogger);
+        const result = await syncTaskToGitHub(env, task, sectionIdToName, milestoneCache, providerRegistry, projectHierarchy, syncLogger);
         results.todoist.processed++;
         if (result.action === 'completed') results.todoist.closed++;
         else if (result.action === 'reopened') results.todoist.reopened++;
@@ -199,14 +204,15 @@ export async function performBidirectionalSync(
     let completedTasksProcessed = 0;
     let completedTasksSkipped = 0;
 
+    // Collect unique providers for multi-provider URL parsing
+    const uniqueProviders = new Set(providerRegistry.values());
+
     // Process completed tasks
     for (const completedTask of completedTasks) {
       try {
-        const resolution = await resolveGitHubUrlForCompletedTask(env, completedTask, syncLogger);
+        const resolution = await resolveIssueUrlForCompletedTask(env, completedTask, uniqueProviders, syncLogger);
         if (!resolution) {
-          // Could not resolve GitHub URL - this task will be retried on next sync
-          // because we won't advance lastCompletedSync past it
-          syncLogger.warn(`Could not resolve GitHub URL for completed task ${completedTask.id}`, {
+          syncLogger.warn(`Could not resolve issue URL for completed task ${completedTask.id}`, {
             taskId: completedTask.id,
             content: completedTask.content,
             hasDescription: !!completedTask.description,
@@ -216,19 +222,22 @@ export async function performBidirectionalSync(
           continue;
         }
 
-        const { url: githubUrl, source } = resolution;
-        const githubInfo = parseGitHubUrl(githubUrl);
+        const { url: issueUrl, source } = resolution;
 
-        if (!githubInfo) {
-          syncLogger.warn(`Invalid GitHub URL format: ${githubUrl}`, { taskId: completedTask.id });
+        // Parse the URL using all known providers
+        const issueInfo = parseIssueUrlFromAnyProvider(issueUrl, uniqueProviders);
+
+        if (!issueInfo) {
+          syncLogger.warn(`Invalid issue URL format: ${issueUrl}`, { taskId: completedTask.id });
           completedTasksSkipped++;
           continue;
         }
 
-        const issue = await getGitHubIssue(env, githubInfo.owner, githubInfo.repo, githubInfo.issueNumber);
+        const { provider } = issueInfo;
+        const issue = await provider.getIssue(issueInfo.owner, issueInfo.repo, issueInfo.issueNumber);
         if (!issue) {
           syncLogger.warn(
-            `GitHub issue not found: ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`
+            `Issue not found: ${issueInfo.owner}/${issueInfo.repo}#${issueInfo.issueNumber}`
           );
           // Issue doesn't exist - mark as processed so we don't keep retrying
           if (!latestSuccessfulCompletedAt || completedTask.completed_at > latestSuccessfulCompletedAt) {
@@ -240,9 +249,9 @@ export async function performBidirectionalSync(
 
         if (issue.state === 'open') {
           syncLogger.info(
-            `Closing issue (resolved via ${source}): ${githubInfo.owner}/${githubInfo.repo}#${githubInfo.issueNumber}`
+            `Closing issue (resolved via ${source}): ${issueInfo.owner}/${issueInfo.repo}#${issueInfo.issueNumber}`
           );
-          await closeGitHubIssue(env, githubInfo.owner, githubInfo.repo, githubInfo.issueNumber);
+          await provider.closeIssue(issueInfo.owner, issueInfo.repo, issueInfo.issueNumber);
           results.todoist.closed++;
 
           try {

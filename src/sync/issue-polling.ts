@@ -1,8 +1,7 @@
-import type { Env } from '../types/env.js';
 import type { GitHubIssue } from '../types/github.js';
 import type { ProjectHierarchy } from '../types/todoist.js';
+import type { ProviderRegistry } from '../providers/types.js';
 import type { Logger } from '../logging/logger.js';
-import { fetchGitHubIssuesSince } from '../github/issues.js';
 
 /**
  * Error information for a repo that failed during polling
@@ -13,9 +12,9 @@ export interface RepoPollingError {
 }
 
 /**
- * Result of polling GitHub for changes
+ * Result of polling issue providers for changes
  */
-export interface GitHubPollResult {
+export interface IssuePollResult {
   issues: GitHubIssue[];
   repoErrors: RepoPollingError[];
   successfulRepos: number;
@@ -23,31 +22,27 @@ export interface GitHubPollResult {
 }
 
 /**
- * Poll GitHub for issues updated since last sync
- * Uses project hierarchy to determine which repos to sync
- *
- * @param env - Environment with API tokens
- * @param since - ISO timestamp to fetch issues updated since (null for all)
- * @param projectHierarchy - Todoist project hierarchy with org/repo mappings
- * @param logger - Logger instance for structured logging
- * @returns Poll result with issues and per-repo error tracking
+ * Poll issue providers for issues updated since last sync
+ * Uses project hierarchy to determine which repos to sync and
+ * the provider registry to select the correct platform for each repo.
  */
-export async function pollGitHubChanges(
-  env: Env,
+export async function pollIssueChanges(
   since: string | null,
   projectHierarchy: ProjectHierarchy,
+  providerRegistry: ProviderRegistry,
   logger: Logger
-): Promise<GitHubPollResult> {
-  const pollLogger = logger.child({ operation: 'github-polling' });
+): Promise<IssuePollResult> {
+  const pollLogger = logger.child({ operation: 'issue-polling' });
   const issues: GitHubIssue[] = [];
   const repoErrors: RepoPollingError[] = [];
   const { subProjects } = projectHierarchy;
 
   // Get unique repos from sub-projects
   const repos = Array.from(subProjects.values()).map((p) => ({
-    owner: p.githubOrg,
+    owner: p.org,
     name: p.repoName,
     projectId: p.id,
+    parentId: p.parentId,
   }));
 
   pollLogger.info(`Polling ${repos.length} repo(s) from Todoist project hierarchy`, {
@@ -61,9 +56,17 @@ export async function pollGitHubChanges(
     const repoFullName = `${repo.owner}/${repo.name}`;
     const repoLogger = pollLogger.child({ repo: repoFullName });
 
+    const provider = providerRegistry.get(repo.parentId);
+    if (!provider) {
+      repoLogger.warn('No provider found for parent project', { parentId: repo.parentId });
+      repoErrors.push({ repo: repoFullName, error: 'No provider configured for parent project' });
+      failedRepos++;
+      continue;
+    }
+
     try {
       repoLogger.debug(`Fetching issues since ${since ?? 'beginning'}`);
-      const repoIssues = await fetchGitHubIssuesSince(env, repo.owner, repo.name, since);
+      const repoIssues = await provider.fetchIssuesSince(repo.owner, repo.name, since);
 
       // Add project info to each issue
       for (const issue of repoIssues) {
