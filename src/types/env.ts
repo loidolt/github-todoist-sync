@@ -11,9 +11,12 @@ export interface Env {
   /** Todoist API token */
   TODOIST_API_TOKEN: string;
 
-  /** JSON mapping: Todoist parent project ID -> GitHub org name */
+  /** JSON mapping: Todoist parent project ID -> GitHub org name or platform config */
   ORG_MAPPINGS: string;
 
   /** Bearer token for /backfill endpoint authentication (optional) */
   BACKFILL_SECRET?: string;
+
+  /** JSON mapping: Gitea instance URL -> API token (optional, required for Gitea orgs) */
+  GITEA_TOKENS?: string;
 }

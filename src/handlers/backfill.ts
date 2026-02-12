@@ -8,8 +8,9 @@ import { createLogger, LogLevel, type Logger } from '../logging/logger.js';
 import { parseOrgMappings, fetchTodoistProjects, buildProjectHierarchy } from '../todoist/projects.js';
 import { fetchExistingTasksForProjects, taskExistsForIssue, createTodoistTask } from '../todoist/tasks.js';
 import { fetchSectionsForProjects, getOrCreateSection } from '../todoist/sections.js';
-import { fetchGitHubIssues } from '../github/issues.js';
-import { fetchOrgRepos } from '../github/repos.js';
+import { createProviderRegistry } from '../providers/factory.js';
+import { GitHubProvider } from '../providers/github.js';
+import type { IssueProvider, ProviderRegistry } from '../providers/types.js';
 import { RateLimiter } from '../todoist/client.js';
 
 /**
@@ -78,6 +79,30 @@ async function processBackfillIssue(
 }
 
 /**
+ * Find a provider for a given owner/org name.
+ * Used in single-repo and org modes where we don't have a parentId.
+ * Falls back to a default GitHub provider if no org mapping matches.
+ */
+function findProviderForOwner(
+  owner: string,
+  providerRegistry: ProviderRegistry,
+  orgMappings: import('../providers/types.js').OrgMappings,
+  env: Env
+): IssueProvider | null {
+  for (const [projectId, config] of orgMappings) {
+    if (config.org === owner) {
+      return providerRegistry.get(projectId) ?? null;
+    }
+  }
+  // Fallback: single-repo and org modes don't require ORG_MAPPINGS,
+  // so default to GitHub when a token is available
+  if (env.GITHUB_TOKEN) {
+    return new GitHubProvider(env.GITHUB_TOKEN);
+  }
+  return null;
+}
+
+/**
  * Handle POST /backfill request
  * Supports streaming NDJSON response for real-time progress
  */
@@ -124,13 +149,16 @@ export async function handleBackfill(
     const todoistLimiter = new RateLimiter(CONSTANTS.TODOIST_RATE_LIMIT);
 
     try {
-      let repos: Array<{ owner: string; name: string; projectId: string | null }>;
+      let repos: Array<{ owner: string; name: string; projectId: string | null; parentId: string | null }>;
       let existingTasks: Map<string, { taskId: string; projectId: string }> | null = null;
       let sectionCache: SectionCache | null = null;
 
+      // Parse org mappings and create provider registry
+      const orgMappings = parseOrgMappings(env, logger);
+      const providerRegistry = createProviderRegistry(orgMappings, env);
+
       if (mode === 'create-mappings') {
         // Special mode: Create KV mappings for existing tasks
-        const orgMappings = parseOrgMappings(env, logger);
         const projects = await fetchTodoistProjects(env);
         const hierarchy = buildProjectHierarchy(projects, orgMappings, logger);
 
@@ -140,7 +168,7 @@ export async function handleBackfill(
         await writeJSON({
           type: 'config',
           mode: 'create-mappings',
-          orgs: Array.from(orgMappings.values()),
+          orgs: Array.from(orgMappings.values()).map((c) => c.org),
           existingTaskCount: existingTasks.size,
         });
 
@@ -190,16 +218,16 @@ export async function handleBackfill(
 
         return;
       } else if (mode === 'single-repo') {
-        repos = [{ owner: owner!, name: repo!, projectId: null }];
+        repos = [{ owner: owner!, name: repo!, projectId: null, parentId: null }];
       } else if (mode === 'projects') {
-        const orgMappings = parseOrgMappings(env, logger);
         const projects = await fetchTodoistProjects(env);
         const hierarchy = buildProjectHierarchy(projects, orgMappings, logger);
 
         repos = Array.from(hierarchy.subProjects.values()).map((p) => ({
-          owner: p.githubOrg,
+          owner: p.org,
           name: p.repoName,
-          projectId: p.id,
+          projectId: p.id as string | null,
+          parentId: p.parentId as string | null,
         }));
 
         const projectIds = repos.map((r) => r.projectId!);
@@ -211,16 +239,21 @@ export async function handleBackfill(
         await writeJSON({
           type: 'config',
           mode: 'projects',
-          orgs: Array.from(orgMappings.values()),
+          orgs: Array.from(orgMappings.values()).map((c) => c.org),
           repos: repos.map((r) => `${r.owner}/${r.name}`),
           existingTaskCount: existingTasks.size,
           sectionCount: Array.from(sectionCache.values()).reduce((sum, m) => sum + m.size, 0),
         });
       } else {
-        // mode === 'org'
+        // mode === 'org' - find a provider for this org
         repos = [];
-        for await (const r of fetchOrgRepos(env, owner!)) {
-          repos.push({ owner: r.owner.login, name: r.name, projectId: null });
+        const provider = findProviderForOwner(owner!, providerRegistry, orgMappings, env);
+        if (provider) {
+          for await (const r of provider.fetchOrgRepos(owner!)) {
+            repos.push({ owner: r.owner.login, name: r.name, projectId: null, parentId: null });
+          }
+        } else {
+          throw new Error(`No provider configured for org "${owner}"`);
         }
       }
 
@@ -233,7 +266,16 @@ export async function handleBackfill(
         try {
           await githubLimiter.waitForToken();
 
-          for await (const issue of fetchGitHubIssues(env, repoInfo.owner, repoInfo.name, {
+          // Find provider for this repo
+          const repoProvider = repoInfo.parentId
+            ? providerRegistry.get(repoInfo.parentId)
+            : findProviderForOwner(repoInfo.owner, providerRegistry, orgMappings, env);
+
+          if (!repoProvider) {
+            throw new Error(`No provider configured for repo ${repoFullName}`);
+          }
+
+          for await (const issue of repoProvider.fetchIssues(repoInfo.owner, repoInfo.name, {
             state,
             limit,
           })) {

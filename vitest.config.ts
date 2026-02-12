@@ -12,6 +12,7 @@ export default defineWorkersConfig({
             GITHUB_TOKEN: "test-github-token",
             TODOIST_API_TOKEN: "test-todoist-token",
             BACKFILL_SECRET: "test-backfill-secret",
+            GITEA_TOKENS: JSON.stringify({ "https://gitea.test.com": "test-gitea-token" }),
           },
         },
       },

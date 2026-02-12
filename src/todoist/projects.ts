@@ -6,6 +6,7 @@ import type {
   SubProject,
 } from '../types/todoist.js';
 import type { Logger } from '../logging/logger.js';
+import type { OrgConfig, OrgMappings, Platform } from '../providers/types.js';
 import { CONSTANTS } from '../config/constants.js';
 import { withRetry } from '../utils/retry.js';
 import { validateTodoistProjects, isObject, isArray, ValidationError } from '../utils/validation.js';
@@ -13,14 +14,16 @@ import { getTodoistHeaders } from './client.js';
 
 /**
  * Parse ORG_MAPPINGS environment variable
- * Format: {"todoist-project-id": "github-org", ...}
- * Returns Map of projectId -> githubOrg
+ *
+ * Supports two formats (backward compatible):
+ * - String values: `{"project-id": "github-org"}` (treated as GitHub)
+ * - Object values: `{"project-id": {"platform": "gitea", "org": "org-name", "instanceUrl": "https://gitea.example.com"}}`
  *
  * @param env - Environment with ORG_MAPPINGS variable
  * @param logger - Logger for structured logging
- * @returns Map of Todoist project ID to GitHub org name
+ * @returns Map of Todoist project ID to OrgConfig
  */
-export function parseOrgMappings(env: Env, logger: Logger): Map<string, string> {
+export function parseOrgMappings(env: Env, logger: Logger): OrgMappings {
   if (!env.ORG_MAPPINGS) {
     logger.warn('No ORG_MAPPINGS configured');
     return new Map();
@@ -39,21 +42,50 @@ export function parseOrgMappings(env: Env, logger: Logger): Map<string, string> 
       );
     }
 
-    // Validate all values are strings
-    const mappings: Record<string, string> = {};
+    const map: OrgMappings = new Map();
+
     for (const [key, value] of Object.entries(parsed)) {
-      if (typeof value !== 'string') {
+      if (typeof value === 'string') {
+        // Backward compatible: string value = GitHub org
+        map.set(key, {
+          org: value,
+          platform: 'github',
+          instanceUrl: 'https://github.com',
+        });
+      } else if (isObject(value)) {
+        // New format: object with platform details
+        const org = (value as Record<string, unknown>).org;
+        if (typeof org !== 'string') {
+          throw new ValidationError(
+            `ORG_MAPPINGS value for key "${key}" must have a string "org" field`,
+            `ORG_MAPPINGS.${key}.org`,
+            'string',
+            typeof org
+          );
+        }
+        const platform = ((value as Record<string, unknown>).platform as Platform) ?? 'github';
+        const instanceUrl = ((value as Record<string, unknown>).instanceUrl as string) ?? 'https://github.com';
+
+        if (platform !== 'github' && platform !== 'gitea') {
+          throw new ValidationError(
+            `ORG_MAPPINGS value for key "${key}" has unsupported platform "${platform}"`,
+            `ORG_MAPPINGS.${key}.platform`,
+            '"github" | "gitea"',
+            String(platform)
+          );
+        }
+
+        map.set(key, { org, platform, instanceUrl });
+      } else {
         throw new ValidationError(
-          `ORG_MAPPINGS value for key "${key}" must be a string`,
+          `ORG_MAPPINGS value for key "${key}" must be a string or object`,
           `ORG_MAPPINGS.${key}`,
-          'string',
+          'string | object',
           typeof value
         );
       }
-      mappings[key] = value;
     }
 
-    const map = new Map(Object.entries(mappings));
     logger.info(`Loaded ${map.size} org mapping(s)`, { count: map.size });
     return map;
   } catch (error) {
@@ -127,17 +159,17 @@ export async function fetchTodoistProjects(env: Env): Promise<TodoistProject[]> 
  * Build project hierarchy from org mappings
  *
  * Creates a two-level hierarchy:
- * - Parent projects (mapped via ORG_MAPPINGS) represent GitHub organizations
- * - Sub-projects (children of parent projects) represent GitHub repositories
+ * - Parent projects (mapped via ORG_MAPPINGS) represent organizations
+ * - Sub-projects (children of parent projects) represent repositories
  *
  * @param projects - Array of Todoist projects from the Sync API
- * @param orgMappings - Map of Todoist project ID to GitHub org name
+ * @param orgMappings - Map of Todoist project ID to OrgConfig
  * @param logger - Logger for structured logging
  * @returns ProjectHierarchy with parent projects, sub-projects, and repo-to-project mapping
  */
 export function buildProjectHierarchy(
   projects: TodoistProject[],
-  orgMappings: Map<string, string>,
+  orgMappings: OrgMappings,
   logger: Logger
 ): ProjectHierarchy {
   const parentProjects = new Map<string, ParentProject>();
@@ -147,13 +179,15 @@ export function buildProjectHierarchy(
   // First pass: identify parent projects (those in org mappings)
   for (const project of projects) {
     const projectId = String(project.id);
-    const githubOrg = orgMappings.get(projectId);
+    const config = orgMappings.get(projectId);
 
-    if (githubOrg) {
+    if (config) {
       parentProjects.set(projectId, {
         id: projectId,
         name: project.name,
-        githubOrg,
+        org: config.org,
+        platform: config.platform,
+        instanceUrl: config.instanceUrl,
       });
     }
   }
@@ -168,15 +202,17 @@ export function buildProjectHierarchy(
     if (parent) {
       const projectId = String(project.id);
       const repoName = project.name;
-      const fullRepo = `${parent.githubOrg}/${repoName}`;
+      const fullRepo = `${parent.org}/${repoName}`;
 
       subProjects.set(projectId, {
         id: projectId,
         name: repoName,
         parentId,
-        githubOrg: parent.githubOrg,
+        org: parent.org,
         repoName,
         fullRepo,
+        platform: parent.platform,
+        webBaseUrl: parent.instanceUrl,
       });
 
       // Map full repo name to project ID for quick lookup
