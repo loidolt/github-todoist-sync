@@ -70,16 +70,16 @@ export async function todoistFetchVoid(
  */
 export async function todoistSyncFetch<T>(
   env: Env,
-  body: Record<string, unknown>
+  body: Record<string, string>
 ): Promise<T> {
   return withRetry(async () => {
     const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
       method: 'POST',
       headers: {
         ...getTodoistHeaders(env),
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: JSON.stringify(body),
+      body: new URLSearchParams(body),
     });
 
     if (!response.ok) {

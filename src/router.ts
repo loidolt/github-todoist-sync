@@ -45,7 +45,7 @@ export async function handleRequest(
 
   // GET /sync-status
   if (method === 'GET' && pathname === '/sync-status') {
-    return handleSyncStatus(env);
+    return handleSyncStatus(env, request);
   }
 
   // GET /api-docs

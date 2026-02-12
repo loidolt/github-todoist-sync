@@ -36,6 +36,16 @@ export interface SyncStatusResponse {
 
   /** ISO timestamp of last fully successful sync */
   lastSuccessfulSync: string;
+
+  /** Todoist project listing (only when ?projects=true) */
+  projects?: {
+    orgMappingKeys: string[];
+    topLevelProjects: Array<{ id: string; name: string; matchesOrgMapping: boolean }>;
+    subProjects: Array<{ id: string; name: string; parent_id: string }>;
+    hint: string;
+  } | {
+    error: string;
+  };
 }
 
 /**

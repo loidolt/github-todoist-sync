@@ -176,9 +176,15 @@ export function buildProjectHierarchy(
   const subProjects = new Map<string, SubProject>();
   const repoToProject = new Map<string, string>();
 
+  // Log available mapping keys for diagnostics
+  const mappingKeys = Array.from(orgMappings.keys());
+  logger.debug(`ORG_MAPPINGS keys: ${mappingKeys.join(', ')}`, { mappingKeys });
+
   // First pass: identify parent projects (those in org mappings)
+  const allProjectIds: string[] = [];
   for (const project of projects) {
     const projectId = String(project.id);
+    allProjectIds.push(projectId);
     const config = orgMappings.get(projectId);
 
     if (config) {
@@ -190,6 +196,21 @@ export function buildProjectHierarchy(
         instanceUrl: config.instanceUrl,
       });
     }
+  }
+
+  // Log diagnostic info if no parents found
+  if (parentProjects.size === 0 && projects.length > 0 && orgMappings.size > 0) {
+    // Show top-level projects (those without parent_id) to help user find correct IDs
+    const topLevelProjects = projects
+      .filter((p) => !p.parent_id)
+      .map((p) => ({ id: String(p.id), name: p.name }));
+    logger.warn(
+      `No ORG_MAPPINGS keys matched any Todoist project IDs. ` +
+      `This may indicate project IDs have changed (e.g., after Todoist API v1 migration). ` +
+      `ORG_MAPPINGS keys: [${mappingKeys.join(', ')}]. ` +
+      `Top-level Todoist projects: ${JSON.stringify(topLevelProjects)}`,
+      { mappingKeys, topLevelProjects, totalProjects: projects.length }
+    );
   }
 
   // Second pass: identify sub-projects (children of parent projects)

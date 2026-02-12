@@ -60,8 +60,10 @@ jobs:
             TODOIST_API_TOKEN
             ORG_MAPPINGS
             BACKFILL_SECRET
+            GITEA_TOKENS
         env:
           GITHUB_TOKEN: ${{ secrets.WORKER_GITHUB_TOKEN }}
           TODOIST_API_TOKEN: ${{ secrets.TODOIST_API_TOKEN }}
           ORG_MAPPINGS: ${{ secrets.ORG_MAPPINGS }}
           BACKFILL_SECRET: ${{ secrets.BACKFILL_SECRET }}
+          GITEA_TOKENS: ${{ secrets.GITEA_TOKENS }}

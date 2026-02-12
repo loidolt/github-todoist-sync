@@ -3,12 +3,16 @@ import type { SyncStatusResponse } from '../types/api.js';
 import { CONSTANTS } from '../config/constants.js';
 import { loadSyncState, getSyncHealthStatus } from '../state/sync-state.js';
 import { jsonResponse } from '../utils/helpers.js';
+import { fetchTodoistProjects, parseOrgMappings } from '../todoist/projects.js';
+import { createLogger, LogLevel } from '../logging/logger.js';
 
 /**
  * Handle GET /sync-status request
  * Returns current sync state and health information with error tracking
+ * Query params:
+ *   ?projects=true - Include Todoist project listing for debugging ORG_MAPPINGS
  */
-export async function handleSyncStatus(env: Env): Promise<Response> {
+export async function handleSyncStatus(env: Env, request?: Request): Promise<Response> {
   try {
     const state = await loadSyncState(env);
 
@@ -57,6 +61,45 @@ export async function handleSyncStatus(env: Env): Promise<Response> {
       }
     } else if (healthStatus === 'error') {
       response.warning = `${state.consecutiveFailures} consecutive sync failures`;
+    }
+
+    // Optionally include project listing for debugging ORG_MAPPINGS
+    const url = request ? new URL(request.url) : null;
+    const includeProjects = url?.searchParams.get('projects') === 'true';
+
+    if (includeProjects) {
+      try {
+        const logger = createLogger(LogLevel.WARN);
+        const orgMappings = parseOrgMappings(env, logger);
+        const projects = await fetchTodoistProjects(env);
+
+        const topLevelProjects = projects
+          .filter((p) => !p.parent_id)
+          .map((p) => ({
+            id: String(p.id),
+            name: p.name,
+            matchesOrgMapping: orgMappings.has(String(p.id)),
+          }));
+
+        const subProjects = projects
+          .filter((p) => p.parent_id)
+          .map((p) => ({
+            id: String(p.id),
+            name: p.name,
+            parent_id: String(p.parent_id),
+          }));
+
+        response.projects = {
+          orgMappingKeys: Array.from(orgMappings.keys()),
+          topLevelProjects,
+          subProjects,
+          hint: 'Update ORG_MAPPINGS to use the "id" values from topLevelProjects where matchesOrgMapping is false',
+        };
+      } catch (error) {
+        response.projects = {
+          error: error instanceof Error ? error.message : 'Failed to fetch projects',
+        };
+      }
     }
 
     return new Response(JSON.stringify(response, null, 2), {
