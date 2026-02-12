@@ -14,12 +14,9 @@ export function jsonResponse(data: unknown, status = 200): Response {
 
 /**
  * Check if a Todoist task is completed
- * Handles both REST API (is_completed) and Sync API (checked) formats
  */
 export function isTaskCompleted(task: TodoistTask | TodoistSyncTask): boolean {
-  const restTask = task as TodoistTask;
-  const syncTask = task as TodoistSyncTask;
-  return restTask.is_completed === true || syncTask.checked === 1;
+  return task.is_completed === true;
 }
 
 /**

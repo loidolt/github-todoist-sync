@@ -35,21 +35,21 @@ function setupOrgMappings(): void {
 // Helper to mock Todoist sections endpoint (required for milestone sync)
 function mockTodoistSections(fm: typeof fetchMock, projectId: string, sections: unknown[] = []): void {
   fm.get('https://api.todoist.com')
-    .intercept({ path: `/rest/v2/sections?project_id=${projectId}` })
+    .intercept({ path: `/api/v1/sections?project_id=${projectId}` })
     .reply(200, sections);
 }
 
 // Helper to mock Todoist projects endpoint
 function mockTodoistProjects(fm: typeof fetchMock, projects: unknown[]): void {
   fm.get('https://api.todoist.com')
-    .intercept({ method: 'POST', path: '/sync/v9/sync' })
+    .intercept({ method: 'POST', path: '/api/v1/sync' })
     .reply(200, { projects, sync_token: 'projects-token' });
 }
 
 // Helper to mock Todoist completed tasks endpoint (required for completed task sync)
 function mockTodoistCompletedTasks(fm: typeof fetchMock, completedItems: unknown[] = []): void {
   fm.get('https://api.todoist.com')
-    .intercept({ path: /\/sync\/v9\/completed\/get_all/ })
+    .intercept({ path: /\/api\/v1\/tasks\/completed_by_completion_date/ })
     .reply(200, { items: completedItems });
 }
 
@@ -135,7 +135,7 @@ describe('Scheduled Handler with Project Hierarchy', () => {
     // Mock Todoist projects API (called first to get hierarchy)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -150,7 +150,7 @@ describe('Scheduled Handler with Project Hierarchy', () => {
     // Mock Todoist items sync (called after projects)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -170,7 +170,7 @@ describe('Scheduled Handler with Project Hierarchy', () => {
     // Mock Todoist projects - only one sub-project
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -193,19 +193,19 @@ describe('Scheduled Handler with Project Hierarchy', () => {
     // Mock Todoist task lookup
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     // Mock Todoist task creation
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .intercept({ method: 'POST', path: '/api/v1/tasks' })
       .reply(201, { id: 'task-123', content: 'Test' });
 
     // Mock Todoist items sync
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -254,7 +254,7 @@ describe('Todoist Task to GitHub Issue Creation', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -269,7 +269,7 @@ describe('Todoist Task to GitHub Issue Creation', () => {
     // Mock Todoist items sync - new task without GitHub URL
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         items: [
           {
@@ -296,7 +296,7 @@ describe('Todoist Task to GitHub Issue Creation', () => {
     // Mock Todoist task update (to add GitHub URL)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: /\/rest\/v2\/tasks\/task-new/ })
+      .intercept({ method: 'POST', path: /\/api\/v1\/tasks\/task-new/ })
       .reply(200, {});
 
     // Mock Todoist completed tasks endpoint
@@ -314,7 +314,7 @@ describe('Todoist Task to GitHub Issue Creation', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -335,7 +335,7 @@ describe('Todoist Task to GitHub Issue Creation', () => {
     // Mock Todoist items sync - task WITH GitHub URL
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         items: [
           {
@@ -374,7 +374,7 @@ describe('GitHub Issue to Todoist Task in Sub-Project', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -397,19 +397,19 @@ describe('GitHub Issue to Todoist Task in Sub-Project', () => {
     // Mock Todoist task lookup - no existing task
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/rest\/v2\/tasks/ })
+      .intercept({ path: /\/api\/v1\/tasks/ })
       .reply(200, []);
 
     // Mock Todoist task creation
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/rest/v2/tasks' })
+      .intercept({ method: 'POST', path: '/api/v1/tasks' })
       .reply(201, { id: 'new-task', content: 'Test' });
 
     // Mock Todoist items sync
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -447,7 +447,7 @@ describe('Multiple Organizations', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: multiOrgProjects, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync) - both sub-projects
@@ -464,7 +464,7 @@ describe('Multiple Organizations', () => {
     // Mock Todoist items sync
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -490,7 +490,7 @@ describe('Task Completion Sync', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -517,7 +517,7 @@ describe('Task Completion Sync', () => {
     // Mock Todoist items sync - empty because completed items are NOT returned by Sync API
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, {
         items: [],
         sync_token: 'items-token',
@@ -527,7 +527,7 @@ describe('Task Completion Sync', () => {
     // Mock Todoist completed/get_all endpoint - this is where completed tasks come from
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/sync\/v9\/completed\/get_all/ })
+      .intercept({ path: /\/api\/v1\/tasks\/completed_by_completion_date/ })
       .reply(200, {
         items: [
           {
@@ -559,7 +559,7 @@ describe('Task Completion Sync', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections
@@ -586,13 +586,13 @@ describe('Task Completion Sync', () => {
     // Mock Todoist items sync
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock completed/get_all - returns task WITHOUT description (realistic scenario)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/sync\/v9\/completed\/get_all/ })
+      .intercept({ path: /\/api\/v1\/tasks\/completed_by_completion_date/ })
       .reply(200, {
         items: [
           {
@@ -629,7 +629,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock Todoist projects
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -644,7 +644,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock Todoist batch task fetch (for auto-backfill check)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -680,7 +680,7 @@ describe('Auto-Backfill for New Projects', () => {
 
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: projectsWithNew, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync) - both sub-projects
@@ -690,7 +690,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock Todoist batch task fetch for auto-backfill (no existing tasks)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'batch-token' });
 
     // Mock GitHub issues for the NEW repo (for auto-backfill)
@@ -710,7 +710,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock batch task creation via Sync API for auto-backfill
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { sync_status: {}, temp_id_mapping: {} });
 
     // Mock GitHub issues for the existing repo (normal sync)
@@ -722,7 +722,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock Todoist items sync (normal sync)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -758,7 +758,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock Todoist projects (same as known)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     // Mock Todoist sections (for milestone sync)
@@ -773,7 +773,7 @@ describe('Auto-Backfill for New Projects', () => {
     // Mock Todoist items sync
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { items: [], sync_token: 'items-token', full_sync: false });
 
     // Mock Todoist completed tasks endpoint
@@ -826,7 +826,7 @@ describe('Reset Projects Endpoint', () => {
     // Mock Todoist projects API
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     const request = new Request('http://localhost/reset-projects', {
@@ -870,7 +870,7 @@ describe('Reset Projects Endpoint', () => {
     // Mock Todoist projects API
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ method: 'POST', path: '/sync/v9/sync' })
+      .intercept({ method: 'POST', path: '/api/v1/sync' })
       .reply(200, { projects: DEFAULT_PROJECTS, sync_token: 'projects-token' });
 
     const request = new Request('http://localhost/reset-projects', {

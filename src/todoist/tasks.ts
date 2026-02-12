@@ -37,7 +37,7 @@ export async function createTodoistTask(
   }
 
   const task = await withRetry(async () => {
-    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks`, {
+    const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks`, {
       method: 'POST',
       headers: {
         ...getTodoistHeaders(env),
@@ -126,7 +126,7 @@ export async function findTodoistTaskByIssueUrl(
   return withRetry(async () => {
     const filterQuery = encodeURIComponent(`search: ${issueUrl}`);
     const response = await fetch(
-      `${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks?filter=${filterQuery}`,
+      `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks?filter=${filterQuery}`,
       {
         headers: getTodoistHeaders(env),
       }
@@ -173,7 +173,7 @@ export async function fetchTodoistTaskById(
   return withRetry(
     async () => {
       const response = await fetch(
-        `${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks/${taskId}`,
+        `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/${taskId}`,
         {
           headers: getTodoistHeaders(env),
         }
@@ -200,7 +200,7 @@ export async function fetchTodoistTaskById(
 export async function completeTodoistTask(env: Env, taskId: string): Promise<void> {
   return withRetry(async () => {
     const response = await fetch(
-      `${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks/${taskId}/close`,
+      `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/${taskId}/close`,
       {
         method: 'POST',
         headers: getTodoistHeaders(env),
@@ -224,7 +224,7 @@ export async function updateTodoistTask(
 ): Promise<void> {
   return withRetry(async () => {
     const response = await fetch(
-      `${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks/${taskId}`,
+      `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/${taskId}`,
       {
         method: 'POST',
         headers: {
@@ -248,7 +248,7 @@ export async function updateTodoistTask(
 export async function reopenTodoistTask(env: Env, taskId: string): Promise<void> {
   return withRetry(async () => {
     const response = await fetch(
-      `${CONSTANTS.TODOIST_API_BASE}/rest/v2/tasks/${taskId}/reopen`,
+      `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/${taskId}/reopen`,
       {
         method: 'POST',
         headers: getTodoistHeaders(env),
@@ -273,7 +273,7 @@ export async function fetchExistingTasksForProjects(
 ): Promise<Map<string, { taskId: string; projectId: string }>> {
   const existingTasks = new Map<string, { taskId: string; projectId: string }>();
 
-  const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/sync/v9/sync`, {
+  const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
     method: 'POST',
     headers: {
       ...getTodoistHeaders(env),

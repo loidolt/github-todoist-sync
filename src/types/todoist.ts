@@ -58,7 +58,7 @@ export interface TodoistSyncTask {
   content: string;
   description: string;
   section_id?: string | null;
-  checked?: number;
+  is_completed?: boolean;
   priority?: number;
   due?: {
     date: string;

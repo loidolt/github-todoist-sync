@@ -21,7 +21,7 @@ export async function pollTodoistChanges(
   syncToken: string,
   projectHierarchy: ProjectHierarchy
 ): Promise<TodoistPollResult> {
-  const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/sync/v9/sync`, {
+  const response = await fetch(`${CONSTANTS.TODOIST_API_BASE}/api/v1/sync`, {
     method: 'POST',
     headers: {
       ...getTodoistHeaders(env),
@@ -79,14 +79,16 @@ export async function pollCompletedTasks(
   since: string | null,
   projectHierarchy: ProjectHierarchy
 ): Promise<CompletedTask[]> {
-  // NOTE: The Todoist `since` parameter appears to be broken/unreliable
-  // So we fetch recent completed tasks and filter client-side by timestamp
   const params = new URLSearchParams({
-    annotate_items: 'true',
     limit: '200',
   });
 
-  const url = `${CONSTANTS.TODOIST_API_BASE}/sync/v9/completed/get_all?${params}`;
+  // The v1 API accepts a `since` parameter for filtering by completion date
+  if (since) {
+    params.set('since', since);
+  }
+
+  const url = `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/completed_by_completion_date?${params}`;
 
   const response = await fetch(url, {
     headers: getTodoistHeaders(env),
@@ -94,7 +96,7 @@ export async function pollCompletedTasks(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Todoist completed/get_all API error: ${response.status} - ${errorText}`);
+    throw new Error(`Todoist completed tasks API error: ${response.status} - ${errorText}`);
   }
 
   interface CompletedItemResponse {
@@ -102,6 +104,7 @@ export async function pollCompletedTasks(
     content: string;
     project_id: string;
     completed_at: string;
+    description?: string;
     item_object?: { description?: string };
     item?: { description?: string };
   }
@@ -111,7 +114,7 @@ export async function pollCompletedTasks(
 
   const rawItems = data.items ?? [];
 
-  // Filter by completion time (client-side since Todoist's since param is unreliable)
+  // Client-side time filtering as a safety net
   const sinceTime = since ? new Date(since).getTime() : 0;
   const timeFilteredItems = rawItems.filter((item) => {
     const completedTime = new Date(item.completed_at).getTime();
@@ -133,7 +136,10 @@ export async function pollCompletedTasks(
       id: completedItem.task_id,
       content: completedItem.content,
       description:
-        completedItem.item_object?.description ?? completedItem.item?.description ?? '',
+        completedItem.description ??
+        completedItem.item_object?.description ??
+        completedItem.item?.description ??
+        '',
       project_id: completedItem.project_id,
       completed_at: completedItem.completed_at,
       _githubOrg: subProject?.githubOrg,

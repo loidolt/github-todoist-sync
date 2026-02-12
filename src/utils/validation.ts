@@ -215,7 +215,7 @@ export interface ValidatedTodoistSyncTask {
   content: string;
   description: string;
   section_id: string | null;
-  checked: number;
+  is_completed: boolean;
 }
 
 export function validateTodoistSyncTask(value: unknown, index?: number): ValidatedTodoistSyncTask {
@@ -247,9 +247,9 @@ export function validateTodoistSyncTask(value: unknown, index?: number): Validat
     ? null
     : String(sectionId);
 
-  // checked is 0 or 1 in Sync API
-  const checked = obj.checked;
-  const validChecked = isNumber(checked) ? checked : 0;
+  // is_completed is a boolean in API v1
+  const isCompleted = obj.is_completed;
+  const validIsCompleted = isBoolean(isCompleted) ? isCompleted : false;
 
   return {
     id: String(id),
@@ -257,7 +257,7 @@ export function validateTodoistSyncTask(value: unknown, index?: number): Validat
     content,
     description: validDescription,
     section_id: validSectionId,
-    checked: validChecked,
+    is_completed: validIsCompleted,
   };
 }
 
