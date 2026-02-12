@@ -23,7 +23,8 @@
       "Bash(ls:*)",
       "Bash(find:*)",
       "WebFetch(domain:docs.gitea.com)",
-      "Bash(node --version:*)"
+      "Bash(node --version:*)",
+      "Bash(python3:*)"
     ]
   }
 }

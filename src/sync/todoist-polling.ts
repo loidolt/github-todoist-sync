@@ -74,22 +74,27 @@ export async function pollTodoistChanges(
 /**
  * Poll Todoist for completed tasks
  * Needed because the Sync API does not return completed items
+ *
+ * v1 API endpoint: GET /api/v1/tasks/completed/by_completion_date
+ * Requires both `since` and `until` parameters.
  */
 export async function pollCompletedTasks(
   env: Env,
   since: string | null,
   projectHierarchy: ProjectHierarchy
 ): Promise<CompletedTask[]> {
+  // Default `since` to buffer window ago if not set
+  const sinceDate = since
+    ? new Date(since)
+    : new Date(Date.now() - CONSTANTS.COMPLETED_TASK_BUFFER_MINUTES * 60 * 1000);
+
   const params = new URLSearchParams({
     limit: '200',
+    since: sinceDate.toISOString(),
+    until: new Date().toISOString(),
   });
 
-  // The v1 API accepts a `since` parameter for filtering by completion date
-  if (since) {
-    params.set('since', since);
-  }
-
-  const url = `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/completed_by_completion_date?${params}`;
+  const url = `${CONSTANTS.TODOIST_API_BASE}/api/v1/tasks/completed/by_completion_date?${params}`;
 
   const response = await fetch(url, {
     headers: getTodoistHeaders(env),
@@ -101,13 +106,11 @@ export async function pollCompletedTasks(
   }
 
   interface CompletedItemResponse {
-    task_id: string;
+    id: string;
     content: string;
     project_id: string;
     completed_at: string;
     description?: string;
-    item_object?: { description?: string };
-    item?: { description?: string };
   }
 
   const data = (await response.json()) as { items?: CompletedItemResponse[] };
@@ -116,7 +119,7 @@ export async function pollCompletedTasks(
   const rawItems = data.items ?? [];
 
   // Client-side time filtering as a safety net
-  const sinceTime = since ? new Date(since).getTime() : 0;
+  const sinceTime = sinceDate.getTime();
   const timeFilteredItems = rawItems.filter((item) => {
     const completedTime = new Date(item.completed_at).getTime();
     return completedTime > sinceTime;
@@ -134,13 +137,9 @@ export async function pollCompletedTasks(
     const subProject = subProjects.get(projectId);
 
     return {
-      id: completedItem.task_id,
+      id: String(completedItem.id),
       content: completedItem.content,
-      description:
-        completedItem.description ??
-        completedItem.item_object?.description ??
-        completedItem.item?.description ??
-        '',
+      description: completedItem.description ?? '',
       project_id: completedItem.project_id,
       completed_at: completedItem.completed_at,
       _org: subProject?.org,

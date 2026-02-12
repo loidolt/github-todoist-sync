@@ -49,7 +49,7 @@ function mockTodoistProjects(fm: typeof fetchMock, projects: unknown[]): void {
 // Helper to mock Todoist completed tasks endpoint (required for completed task sync)
 function mockTodoistCompletedTasks(fm: typeof fetchMock, completedItems: unknown[] = []): void {
   fm.get('https://api.todoist.com')
-    .intercept({ path: /\/api\/v1\/tasks\/completed_by_completion_date/ })
+    .intercept({ path: /\/api\/v1\/tasks\/completed\/by_completion_date/ })
     .reply(200, { items: completedItems });
 }
 
@@ -527,18 +527,15 @@ describe('Task Completion Sync', () => {
     // Mock Todoist completed/get_all endpoint - this is where completed tasks come from
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/api\/v1\/tasks\/completed_by_completion_date/ })
+      .intercept({ path: /\/api\/v1\/tasks\/completed\/by_completion_date/ })
       .reply(200, {
         items: [
           {
-            task_id: 'task-123',
+            id: 'task-123',
             project_id: TEST_SUB_PROJECT_ID,
             content: '[#1] Task',
-            completed_at: '2024-01-15T10:30:00Z',
-            item: {
-              id: 'task-123',
-              description: 'https://github.com/test-org/test-repo/issues/1',
-            },
+            completed_at: new Date().toISOString(),
+            description: 'https://github.com/test-org/test-repo/issues/1',
           },
         ],
       });
@@ -592,15 +589,15 @@ describe('Task Completion Sync', () => {
     // Mock completed/get_all - returns task WITHOUT description (realistic scenario)
     fetchMock
       .get('https://api.todoist.com')
-      .intercept({ path: /\/api\/v1\/tasks\/completed_by_completion_date/ })
+      .intercept({ path: /\/api\/v1\/tasks\/completed\/by_completion_date/ })
       .reply(200, {
         items: [
           {
-            task_id: 'task-456',
+            id: 'task-456',
             project_id: TEST_SUB_PROJECT_ID,
             content: '[#2] Task from KV',
-            completed_at: '2024-01-15T10:30:00Z',
-            // Note: NO description field - this is realistic for completed/get_all
+            completed_at: new Date().toISOString(),
+            // Note: NO description field - this is realistic for completed tasks
           },
         ],
       });
